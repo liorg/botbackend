@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 
+=======
+<<<<<<< HEAD
+>>>>>>> 8ba3044 (initial commit)
 # botbackend
 =======
 # ScenarioBot — FastAPI Backend
