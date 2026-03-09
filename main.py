@@ -31,7 +31,7 @@ app.include_router(calls.router)
 # ── Health ────────────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.0.0"}
+    return {"status": "ok", "version": "1.0.1"}
 @app.get("/whoami")
 def whoami():
     db = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
