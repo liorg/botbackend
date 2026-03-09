@@ -19,12 +19,3 @@ jobs:
             sudo git pull origin main
             sudo venv/bin/pip install -r requirements.txt -q
             sudo systemctl restart fastapi
-```
-
----
-
-**ב-GitHub → הפרויקט שלך → Settings → Secrets and variables → Actions → New repository secret:**
-```
-SERVER_HOST    = ה-IP של השרת
-SERVER_USER    = admin
-SERVER_SSH_KEY = המפתח הפרטי SSH שלך
