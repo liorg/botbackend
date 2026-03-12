@@ -1,3 +1,5 @@
+
+#main.py
 import os
 
 from fastapi import FastAPI
@@ -5,33 +7,62 @@ from fastapi.middleware.cors import CORSMiddleware
 from routers import auth, phones, contacts, scenarios, schedules, calls
 from supabase import create_client
 from dotenv import load_dotenv
+
 load_dotenv()  # ← חייב להיות לפני הכל
 app = FastAPI(title="ScenarioBot API", version="1.0.0")
 
-# ── CORS ──────────────────────────────────────────────────────
+# Allowed origins - add your domains here
+ALLOWED_ORIGINS = [
+    # Production - Vercel
+    "https://ui.michal-solutions.com",
+    "https://www.ui.michal-solutions.com",
+    # API domain (if needed)
+    "https://vid.michal-solutions.com",
+    # Development
+    "http://localhost:5173",  # Vite dev server
+    "http://localhost:3000",  # Alternative dev server
+    "http://127.0.0.1:5173",
+]
+
+# In development, you might want to allow all origins
+if os.getenv("ENV", "production") == "development":
+    ALLOWED_ORIGINS = ["*"]
+ 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://your-app.vercel.app",  # ← החלף בדומיין שלך
-        "http://localhost:5173",
-        "http://localhost:3000",
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "Accept",
+        "Origin",
+        "X-Requested-With",
     ],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    expose_headers=["Content-Length", "X-Request-Id"],
+    max_age=600,  # Cache preflight requests for 10 minutes
 )
-
 # ── Routers ───────────────────────────────────────────────────
-app.include_router(auth.router)
-app.include_router(phones.router)
-app.include_router(contacts.router)
-app.include_router(scenarios.router)
-app.include_router(schedules.router)
-app.include_router(calls.router)
+app.include_router(auth.router, prefix="/api")
+app.include_router(phones.router, prefix="/api")
+app.include_router(contacts.router, prefix="/api")
+app.include_router(scenarios.router, prefix="/api")
+app.include_router(schedules.router, prefix="/api")
+app.include_router(calls.router, prefix="/api")
 
+# ── Root Endpoint ────────────────────────────────────────────────────────────
+@app.get("/")
+async def root():
+    return {
+        "name": "ScenarioBot API",
+        "version": "1.0.0",
+        "status": "running"
+    }
 # ── Health ────────────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.0.3"}
+    return {"status": "ok", "version": "1.0.4"}
 @app.get("/whoami")
 def whoami():
     db = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
