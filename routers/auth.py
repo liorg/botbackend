@@ -11,13 +11,10 @@ import jwt
 import os
 from datetime import datetime, timedelta
 from typing import Optional
-from dotenv import load_dotenv
-
-
 
 # Import centralized logging
 from logging_config import get_logger
-load_dotenv()
+
 
 logger = get_logger("auth")
 
