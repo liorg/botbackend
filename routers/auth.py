@@ -1,45 +1,98 @@
+"""
+auth.py - Authentication & Settings API for VID
+FastAPI router with JWT authentication and Supabase integration
+"""
+
 from fastapi import APIRouter, HTTPException, Header, Depends
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
-from supabase import create_client
-import httpx, jwt, os
+from supabase import create_client, Client
+import httpx
+import jwt
+import os
 from datetime import datetime, timedelta
 from typing import Optional
+from dotenv import load_dotenv
+
+
+
+# Import centralized logging
+from logging_config import get_logger
+load_dotenv()
+
+logger = get_logger("auth")
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-# ── Database ─────────────────────────────────────────────────────────────────
-def get_db():
-    return create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+# ══════════════════════════════════════════════════════════════════════════════
+# Database Connection
+# ══════════════════════════════════════════════════════════════════════════════
 
-# ── JWT ──────────────────────────────────────────────────────────────────────
+def get_db() -> Client:
+    """Get Supabase client with service role key for full access"""
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+    
+    if not url or not key:
+        logger.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
+        raise HTTPException(status_code=500, detail="Database configuration error")
+    
+    return create_client(url, key)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# JWT Configuration
+# ══════════════════════════════════════════════════════════════════════════════
+
 JWT_SECRET = os.getenv("JWT_SECRET")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_DAYS = 7
 
 def make_jwt(user_id: str, email: str) -> str:
-    return jwt.encode({
+    """Create a JWT token for the user"""
+    jwt_secret = get_jwt_secret()
+    if not jwt_secret:
+        logger.error("JWT_SECRET not configured")
+        raise HTTPException(status_code=500, detail="JWT_SECRET not configured")
+    
+    payload = {
         "sub": email,
         "uid": user_id,
+        "iat": datetime.utcnow(),
         "exp": datetime.utcnow() + timedelta(days=JWT_EXPIRATION_DAYS)
-    }, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    }
+    return jwt.encode(payload, jwt_secret, algorithm=JWT_ALGORITHM)
 
 def decode_jwt(token: str) -> dict:
+    """Decode and validate a JWT token"""
+    if not JWT_SECRET:
+        raise HTTPException(status_code=500, detail="JWT_SECRET not configured")
+    
     try:
         return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
+        logger.warning("Token expired")
         raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
+    except jwt.InvalidTokenError as e:
+        logger.warning(f"Invalid JWT token: {e}")
         raise HTTPException(status_code=401, detail="Invalid token")
 
+
 def get_current_user(authorization: str = Header(None)) -> dict:
-    if not authorization or not authorization.startswith("Bearer "):
+    """Dependency to get current user from JWT token"""
+    if not authorization:
         raise HTTPException(status_code=401, detail="Missing authorization header")
+    
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization format")
     
     token = authorization.replace("Bearer ", "")
     return decode_jwt(token)
 
-# ── Request Models ───────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Request Models
+# ══════════════════════════════════════════════════════════════════════════════
+
 class GoogleTokenRequest(BaseModel):
     token: str
 
@@ -54,173 +107,277 @@ class SignupRequest(BaseModel):
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
 
-class UpdatePasswordRequest(BaseModel):
-    new_password: str
-
 class UpdateSettingsRequest(BaseModel):
     full_name: Optional[str] = None
     mobile: Optional[str] = None
     lang: Optional[str] = None
     avatar: Optional[str] = None
+    package_type: Optional[str] = None
 
-# ── Auth Endpoints ───────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Auth Endpoints
+# ══════════════════════════════════════════════════════════════════════════════
+
 @router.post("/google")
 async def google_auth(request: GoogleTokenRequest):
     """Login/Signup via Google OAuth"""
+    logger.info("Google auth attempt", extra={"action": "google_auth_start"})
+    
+    # Verify Google token
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             "https://www.googleapis.com/oauth2/v3/userinfo",
             headers={"Authorization": f"Bearer {request.token}"}
         )
+    
     if resp.status_code != 200:
+        logger.warning("Google token verification failed", extra={
+            "action": "google_auth_failed",
+            "status_code": resp.status_code
+        })
         raise HTTPException(status_code=401, detail="Invalid Google token")
 
     info = resp.json()
+    email = info.get("email")
+    google_id = info.get("sub")
+    name = info.get("name", "")
+    picture = info.get("picture", "")
+    
+    logger.info(f"Google auth for: {email}", extra={
+        "action": "google_auth",
+        "email": email
+    })
+    
     db = get_db()
 
-    existing = db.table("users").select("*").eq("email", info["email"]).execute()
+    # Check if user exists
+    existing = db.table("users").select("*").eq("email", email).execute()
+    
     if existing.data:
         user_row = existing.data[0]
         db.table("users").update({
-            "last_login": datetime.utcnow().isoformat()
+            "last_login": datetime.utcnow().isoformat(),
+            "google_id": google_id,
+            "avatar": picture if not user_row.get("avatar") else user_row.get("avatar"),
         }).eq("id", user_row["id"]).execute()
+        
+        logger.info("Google login successful", extra={
+            "action": "google_login_success",
+            "user_id": str(user_row["id"]),
+            "email": email
+        })
     else:
         result = db.table("users").insert({
-            "email": info["email"],
-            "name": info.get("name", ""),
-            "google_id": info["sub"],
-            "avatar": info.get("picture", ""),
+            "email": email,
+            "name": name,
+            "google_id": google_id,
+            "avatar": picture,
+            "lang": "he",
+            "package_type": "basic",
+            "created_at": datetime.utcnow().isoformat(),
         }).execute()
+        
+        if not result.data:
+            logger.error(f"Failed to create user: {email}")
+            raise HTTPException(status_code=500, detail="Failed to create user")
+        
         user_row = result.data[0]
+        logger.info("New Google user created", extra={
+            "action": "google_signup_success",
+            "user_id": str(user_row["id"]),
+            "email": email
+        })
 
     return {
-        "access_token": make_jwt(user_row["id"], user_row["email"]),
+        "access_token": make_jwt(str(user_row["id"]), user_row["email"]),
         "user": {
-            "id": user_row["id"],
+            "id": str(user_row["id"]),
             "email": user_row["email"],
             "name": user_row.get("name", ""),
-            "avatar": user_row.get("avatar", "")
+            "avatar": user_row.get("avatar", ""),
+            "lang": user_row.get("lang", "he"),
         }
     }
 
+
 @router.post("/login")
 async def login(request: LoginRequest):
-    """Login with email/password"""
+    """Login with email/password via Supabase Auth"""
+    logger.info("Login attempt", extra={
+        "action": "login_attempt",
+        "email": request.email
+    })
+    
     db = get_db()
+    
     try:
         result = db.auth.sign_in_with_password({
             "email": request.email,
             "password": request.password
         })
-    except Exception:
+    except Exception as e:
+        logger.warning("Login failed - invalid credentials", extra={
+            "action": "login_failed",
+            "email": request.email,
+            "reason": "invalid_credentials"
+        })
         raise HTTPException(status_code=401, detail="אימייל או סיסמה שגויים")
 
     if not result.user:
         raise HTTPException(status_code=401, detail="אימייל או סיסמה שגויים")
 
     if not result.user.email_confirmed_at:
+        logger.warning("Unverified email login attempt", extra={
+            "action": "login_failed",
+            "email": request.email,
+            "reason": "email_not_verified"
+        })
         raise HTTPException(status_code=403, detail="יש לאמת את המייל לפני הכניסה")
 
     user = result.user
-    name = user.user_metadata.get("full_name", "") if user.user_metadata else ""
+    user_meta = user.user_metadata or {}
+    name = user_meta.get("full_name", "")
     
-    # Update last_login in public.users
     db.table("users").upsert({
         "id": user.id,
         "email": user.email,
+        "name": name,
         "last_login": datetime.utcnow().isoformat(),
-    }).execute()
+    }, on_conflict="id").execute()
 
+    logger.info("Login successful", extra={
+        "action": "login_success",
+        "user_id": user.id,
+        "email": request.email
+    })
+    
     return {
         "access_token": make_jwt(user.id, user.email),
         "user": {
             "id": user.id,
             "email": user.email,
-            "name": name
+            "name": name,
         }
     }
+
 
 @router.post("/signup")
 async def signup(request: SignupRequest):
     """Signup with email/password"""
+    logger.info("Signup attempt", extra={
+        "action": "signup_attempt",
+        "email": request.email
+    })
+    
     db = get_db()
+    
     try:
         result = db.auth.sign_up({
             "email": request.email,
-            "password": request.password
+            "password": request.password,
+            "options": {
+                "email_redirect_to": f"{os.getenv('FRONTEND_URL', 'https://ui.michal-solutions.com')}/login"
+            }
         })
     except Exception as e:
-        if "already registered" in str(e):
+        error_msg = str(e).lower()
+        if "already registered" in error_msg or "already exists" in error_msg:
+            logger.warning("Signup failed - email exists", extra={
+                "action": "signup_failed",
+                "email": request.email,
+                "reason": "email_exists"
+            })
             raise HTTPException(status_code=400, detail="האימייל כבר רשום במערכת")
+        logger.error(f"Signup error: {e}", extra={"action": "signup_error"})
         raise HTTPException(status_code=400, detail="הרשמה נכשלה")
 
     if not result.user:
         raise HTTPException(status_code=400, detail="הרשמה נכשלה")
 
-    # Create entry in public.users (will be updated when email is confirmed)
     try:
         db.table("users").insert({
             "id": result.user.id,
             "email": result.user.email,
             "name": "",
+            "lang": "he",
+            "package_type": "basic",
             "created_at": datetime.utcnow().isoformat(),
         }).execute()
-    except Exception:
-        pass  # May fail if trigger already created the row
+    except Exception as e:
+        logger.debug(f"User row creation skipped (trigger may exist): {e}")
 
+    logger.info("Signup successful", extra={
+        "action": "signup_success",
+        "user_id": result.user.id,
+        "email": request.email
+    })
+    
     return {"message": "נשלח מייל אימות — בדוק את תיבת הדואר שלך ואשר את הכתובת"}
+
 
 @router.post("/forgot-password")
 async def forgot_password(request: ForgotPasswordRequest):
     """Send password reset email"""
+    logger.info("Password reset request", extra={
+        "action": "password_reset_request",
+        "email": request.email
+    })
+    
     db = get_db()
+    
     try:
         db.auth.reset_password_email(
             request.email,
-            options={"redirect_to": f"{os.getenv('FRONTEND_URL')}/reset-password"}
+            options={
+                "redirect_to": f"{os.getenv('FRONTEND_URL', 'https://ui.michal-solutions.com')}/reset-password"
+            }
         )
-    except Exception:
-        pass  # Don't reveal if email exists
+    except Exception as e:
+        logger.debug(f"Password reset error (may be okay): {e}")
+    
     return {"message": "אם האימייל קיים במערכת — נשלחו הוראות איפוס"}
 
-@router.post("/update-password")
-async def update_password(
-    request: UpdatePasswordRequest,
-    current_user: dict = Depends(get_current_user)
-):
-    """Update password (requires authentication)"""
-    db = get_db()
-    try:
-        # Note: This requires the user to be authenticated via Supabase session
-        # The JWT we use is custom, so we need to use Supabase's method
-        db.auth.update_user({"password": request.new_password})
-        return {"message": "הסיסמה עודכנה בהצלחה"}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail="שגיאה בעדכון הסיסמה")
 
-# ── Settings Endpoints ───────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Settings Endpoints
+# ══════════════════════════════════════════════════════════════════════════════
+
 @router.get("/settings")
 async def get_settings(current_user: dict = Depends(get_current_user)):
     """Get current user settings"""
-    db = get_db()
     user_id = current_user.get("uid")
+    logger.info("Get settings", extra={
+        "action": "get_settings",
+        "user_id": user_id
+    })
     
-    result = db.table("users").select("*").eq("id", user_id).single().execute()
+    db = get_db()
+    
+    try:
+        result = db.table("users").select("*").eq("id", user_id).single().execute()
+    except Exception as e:
+        logger.error(f"Failed to get user settings: {e}", extra={"user_id": user_id})
+        raise HTTPException(status_code=404, detail="משתמש לא נמצא")
     
     if not result.data:
         raise HTTPException(status_code=404, detail="משתמש לא נמצא")
     
     user = result.data
+    
     return {
         "id": user.get("id"),
         "email": user.get("email"),
-        "full_name": user.get("name"),
-        "mobile": user.get("mobile"),
-        "lang": user.get("lang", "he"),
-        "avatar": user.get("avatar"),
-        "package_type": user.get("package_type", "basic"),
+        "full_name": user.get("name") or "",
+        "name": user.get("name") or "",
+        "mobile": user.get("mobile") or "",
+        "lang": user.get("lang") or "he",
+        "avatar": user.get("avatar") or "",
+        "package_type": user.get("package_type") or "basic",
         "created_at": user.get("created_at"),
+        "updated_at": user.get("updated_at"),
     }
+
 
 @router.put("/settings")
 async def update_settings(
@@ -228,10 +385,14 @@ async def update_settings(
     current_user: dict = Depends(get_current_user)
 ):
     """Update user settings"""
-    db = get_db()
     user_id = current_user.get("uid")
+    logger.info("Update settings start", extra={
+        "action": "update_settings_start",
+        "user_id": user_id
+    })
     
-    # Build update dict (only non-None values)
+    db = get_db()
+    
     update_data = {}
     if request.full_name is not None:
         update_data["name"] = request.full_name
@@ -241,19 +402,53 @@ async def update_settings(
         update_data["lang"] = request.lang
     if request.avatar is not None:
         update_data["avatar"] = request.avatar
+    if request.package_type is not None:
+        update_data["package_type"] = request.package_type
     
     if not update_data:
-        return {"message": "אין שינויים לעדכון"}
+        return {"message": "אין שינויים לעדכון", "updated": {}}
     
     update_data["updated_at"] = datetime.utcnow().isoformat()
     
     try:
-        db.table("users").update(update_data).eq("id", user_id).execute()
+        result = db.table("users").update(update_data).eq("id", user_id).execute()
+        
+        if not result.data:
+            logger.warning("User not found for update", extra={"user_id": user_id})
+            raise HTTPException(status_code=404, detail="משתמש לא נמצא")
+        
+        logger.info("Settings updated", extra={
+            "action": "update_settings_success",
+            "user_id": user_id,
+            "fields": list(update_data.keys())
+        })
+        
         return {"message": "ההגדרות עודכנו בהצלחה", "updated": update_data}
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Failed to update settings: {e}", extra={"user_id": user_id})
         raise HTTPException(status_code=500, detail="שגיאה בעדכון ההגדרות")
 
-# ── Health Check ─────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Utility Endpoints
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/me")
+async def get_me(current_user: dict = Depends(get_current_user)):
+    """Get current user info from JWT"""
+    return {
+        "uid": current_user.get("uid"),
+        "email": current_user.get("sub"),
+    }
+
+
 @router.get("/health")
 async def health():
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+    """Health check endpoint"""
+    return {
+        "status": "ok",
+        "service": "auth",
+        "timestamp": datetime.utcnow().isoformat()
+    }
