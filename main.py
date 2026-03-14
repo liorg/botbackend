@@ -85,6 +85,7 @@ async def root():
 # ── Health ────────────────────────────────────────────────────
 @app.get("/health")
 def health():
+    logger.info("Health check", extra={"action": "health_check"})   
     return {"status": "ok", "version": version}
 
 @app.get("/whoami")
