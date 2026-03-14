@@ -1,4 +1,3 @@
-
 #main.py
 import os
 
@@ -8,7 +7,13 @@ from routers import auth, phones, contacts, scenarios, schedules, calls
 from supabase import create_client
 from dotenv import load_dotenv
 
+# Import centralized logging
+from logging_config import get_logger, logging_middleware
+
 load_dotenv()  # ← חייב להיות לפני הכל
+
+logger = get_logger("main")
+
 app = FastAPI(title="ScenarioBot API", version="1.0.0")
 
 # Allowed origins - add your domains here
@@ -43,6 +48,10 @@ app.add_middleware(
     expose_headers=["Content-Length", "X-Request-Id"],
     max_age=600,  # Cache preflight requests for 10 minutes
 )
+
+# ── Logging Middleware ────────────────────────────────────────
+app.middleware("http")(logging_middleware)
+
 # ── Routers ───────────────────────────────────────────────────
 app.include_router(auth.router, prefix="/api")
 app.include_router(phones.router, prefix="/api")
@@ -50,6 +59,19 @@ app.include_router(contacts.router, prefix="/api")
 app.include_router(scenarios.router, prefix="/api")
 app.include_router(schedules.router, prefix="/api")
 app.include_router(calls.router, prefix="/api")
+
+# ── Startup/Shutdown Events ───────────────────────────────────
+@app.on_event("startup")
+async def startup():
+    logger.info("ScenarioBot API starting", extra={
+        "action": "startup",
+        "version": "1.0.0",
+        "environment": os.getenv("ENV", "production")
+    })
+
+@app.on_event("shutdown")
+async def shutdown():
+    logger.info("ScenarioBot API shutting down", extra={"action": "shutdown"})
 
 # ── Root Endpoint ────────────────────────────────────────────────────────────
 @app.get("/")
@@ -59,10 +81,12 @@ async def root():
         "version": "1.0.0",
         "status": "running"
     }
+
 # ── Health ────────────────────────────────────────────────────
 @app.get("/health")
 def health():
     return {"status": "ok", "version": "1.0.4"}
+
 @app.get("/whoami")
 def whoami():
     db = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
