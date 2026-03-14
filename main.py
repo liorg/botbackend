@@ -9,12 +9,12 @@ from dotenv import load_dotenv
 
 # Import centralized logging
 from logging_config import get_logger, logging_middleware
-
+version="1.0.6"
 load_dotenv()  # ← חייב להיות לפני הכל
 
 logger = get_logger("main")
 
-app = FastAPI(title="ScenarioBot API", version="1.0.0")
+app = FastAPI(title="ScenarioBot API", version=version)
 
 # Allowed origins - add your domains here
 ALLOWED_ORIGINS = [
@@ -65,7 +65,7 @@ app.include_router(calls.router, prefix="/api")
 async def startup():
     logger.info("ScenarioBot API starting", extra={
         "action": "startup",
-        "version": "1.0.0",
+        "version": version,
         "environment": os.getenv("ENV", "production")
     })
 
@@ -78,14 +78,14 @@ async def shutdown():
 async def root():
     return {
         "name": "ScenarioBot API",
-        "version": "1.0.0",
+        "version":version,
         "status": "running"
     }
 
 # ── Health ────────────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.0.5"}
+    return {"status": "ok", "version": version}
 
 @app.get("/whoami")
 def whoami():
@@ -95,47 +95,4 @@ def whoami():
         "status": "ok",
         "supabase": "connected",
         "users_count": result.count
-    }
-@app.get("/debug/env")
-def debug_env():
-    """
-    בדיקת Environment Variables
-    ⚠️ מחק את זה אחרי הבדיקה! לא להשאיר ב-production!
-    """
-    import os
-    
-    # רשימת המשתנים שאתה צריך
-    required_vars = [
-        "SUPABASE_URL",
-        "SUPABASE_KEY",
-        "SUPABASE_SERVICE_ROLE_KEY",
-        "JWT_SECRET",
-        "FRONTEND_URL",
-        "GOOGLE_CLIENT_ID",
-        "GOOGLE_CLIENT_SECRET",
-        "ENV",
-        "K_SERVICE",              # Cloud Run
-        "GOOGLE_CLOUD_PROJECT",   # GCP Project
-    ]
-    
-    result = {}
-    missing = []
-    
-    for var in required_vars:
-        value = os.getenv(var)
-        if value:
-            # הצג רק 10 תווים ראשונים (בטיחות)
-            if len(value) > 10:
-                result[var] = f"{value[:10]}... ✅"
-            else:
-                result[var] = f"{value} ✅"
-        else:
-            result[var] = "❌ MISSING"
-            missing.append(var)
-    
-    return {
-        "status": "ok" if not missing else "missing_vars",
-        "missing_count": len(missing),
-        "missing": missing,
-        "variables": result
     }
