@@ -85,7 +85,7 @@ async def root():
 # ── Health ────────────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.0.4"}
+    return {"status": "ok", "version": "1.0.5"}
 
 @app.get("/whoami")
 def whoami():
@@ -95,4 +95,47 @@ def whoami():
         "status": "ok",
         "supabase": "connected",
         "users_count": result.count
+    }
+@app.get("/debug/env")
+def debug_env():
+    """
+    בדיקת Environment Variables
+    ⚠️ מחק את זה אחרי הבדיקה! לא להשאיר ב-production!
+    """
+    import os
+    
+    # רשימת המשתנים שאתה צריך
+    required_vars = [
+        "SUPABASE_URL",
+        "SUPABASE_KEY",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "JWT_SECRET",
+        "FRONTEND_URL",
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET",
+        "ENV",
+        "K_SERVICE",              # Cloud Run
+        "GOOGLE_CLOUD_PROJECT",   # GCP Project
+    ]
+    
+    result = {}
+    missing = []
+    
+    for var in required_vars:
+        value = os.getenv(var)
+        if value:
+            # הצג רק 10 תווים ראשונים (בטיחות)
+            if len(value) > 10:
+                result[var] = f"{value[:10]}... ✅"
+            else:
+                result[var] = f"{value} ✅"
+        else:
+            result[var] = "❌ MISSING"
+            missing.append(var)
+    
+    return {
+        "status": "ok" if not missing else "missing_vars",
+        "missing_count": len(missing),
+        "missing": missing,
+        "variables": result
     }
