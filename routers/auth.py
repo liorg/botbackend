@@ -43,6 +43,8 @@ def get_db() -> Client:
 JWT_SECRET = os.getenv("JWT_SECRET")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_DAYS = 7
+def get_jwt_secret():
+    return os.getenv("JWT_SECRET")
 
 def make_jwt(user_id: str, email: str) -> str:
     """Create a JWT token for the user"""
