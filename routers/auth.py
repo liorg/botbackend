@@ -479,7 +479,7 @@ async def upload_avatar(
     logger.info("Avatar upload start", extra={
         "action": "avatar_upload_start",
         "user_id": user_id,
-        "filename": file.filename,
+        "file_name": file.filename,
         "content_type": file.content_type
     })
     
