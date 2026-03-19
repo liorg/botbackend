@@ -32,7 +32,13 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 def upload_to_gcs(file_data: bytes, filename: str, content_type: str) -> str:
     """Upload file to Google Cloud Storage and return public URL"""
     try:
-        client = storage.Client()
+        # Use explicit credentials if available
+        key_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        if key_path:
+            client = storage.Client.from_service_account_json(key_path)
+        else:
+            client = storage.Client()
+        
         bucket = client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(f"avatars/{filename}")
         blob.upload_from_string(file_data, content_type=content_type)
@@ -40,7 +46,7 @@ def upload_to_gcs(file_data: bytes, filename: str, content_type: str) -> str:
     except Exception as e:
         logger.error(f"GCS upload failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to upload image")
- 
+        
 def get_db() -> Client:
     """Get Supabase client with service role key for full access"""
     url = os.getenv("SUPABASE_URL")
