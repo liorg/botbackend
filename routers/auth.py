@@ -11,10 +11,16 @@ import jwt
 import os
 from datetime import datetime, timedelta
 from typing import Optional
-
+from fastapi import UploadFile, File
+from google.cloud import storage
+import uuid
 # Import centralized logging
 from logging_config import get_logger
-
+# 2. Add this constant after the JWT constants:
+# ─────────────────────────────────────────────────────────────────────────────
+GCS_BUCKET_NAME = "vid-michal-uploads"
+GCS_PUBLIC_URL = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}"
+ 
 
 logger = get_logger("auth")
 
@@ -23,7 +29,18 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # ══════════════════════════════════════════════════════════════════════════════
 # Database Connection
 # ══════════════════════════════════════════════════════════════════════════════
-
+def upload_to_gcs(file_data: bytes, filename: str, content_type: str) -> str:
+    """Upload file to Google Cloud Storage and return public URL"""
+    try:
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(f"avatars/{filename}")
+        blob.upload_from_string(file_data, content_type=content_type)
+        return f"{GCS_PUBLIC_URL}/avatars/{filename}"
+    except Exception as e:
+        logger.error(f"GCS upload failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload image")
+ 
 def get_db() -> Client:
     """Get Supabase client with service role key for full access"""
     url = os.getenv("SUPABASE_URL")
@@ -63,11 +80,12 @@ def make_jwt(user_id: str, email: str) -> str:
 
 def decode_jwt(token: str) -> dict:
     """Decode and validate a JWT token"""
-    if not JWT_SECRET:
+    jwt_secret = get_jwt_secret()
+    if not jwt_secret:
         raise HTTPException(status_code=500, detail="JWT_SECRET not configured")
     
     try:
-        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return jwt.decode(token, jwt_secret, algorithms=[JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
         logger.warning("Token expired")
         raise HTTPException(status_code=401, detail="Token expired")
@@ -451,3 +469,61 @@ async def health():
         "service": "auth",
         "timestamp": datetime.utcnow().isoformat()
     }
+@router.post("/avatar")
+async def upload_avatar(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """Upload avatar image to GCS and update user record"""
+    user_id = current_user.get("uid")
+    logger.info("Avatar upload start", extra={
+        "action": "avatar_upload_start",
+        "user_id": user_id,
+        "filename": file.filename,
+        "content_type": file.content_type
+    })
+    
+    # Validate file type
+    allowed_types = ["image/jpeg", "image/png", "image/gif", "image/webp"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=400, 
+            detail="סוג קובץ לא נתמך. השתמש ב-JPG, PNG, GIF או WebP"
+        )
+    
+    # Validate file size (max 5MB)
+    contents = await file.read()
+    if len(contents) > 5 * 1024 * 1024:
+        raise HTTPException(
+            status_code=400,
+            detail="הקובץ גדול מדי. מקסימום 5MB"
+        )
+    
+    # Generate unique filename
+    ext = file.filename.split(".")[-1] if "." in file.filename else "jpg"
+    unique_filename = f"{user_id}_{uuid.uuid4().hex[:8]}.{ext}"
+    
+    # Upload to GCS
+    avatar_url = upload_to_gcs(contents, unique_filename, file.content_type)
+    
+    # Update user record in database
+    db = get_db()
+    try:
+        db.table("users").update({
+            "avatar": avatar_url,
+            "updated_at": datetime.utcnow().isoformat()
+        }).eq("id", user_id).execute()
+        
+        logger.info("Avatar uploaded successfully", extra={
+            "action": "avatar_upload_success",
+            "user_id": user_id,
+            "avatar_url": avatar_url
+        })
+        
+        return {
+            "message": "התמונה הועלתה בהצלחה",
+            "avatar_url": avatar_url
+        }
+    except Exception as e:
+        logger.error(f"Failed to update avatar in DB: {e}", extra={"user_id": user_id})
+        raise HTTPException(status_code=500, detail="שגיאה בשמירת התמונה")
