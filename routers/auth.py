@@ -46,7 +46,7 @@ def upload_to_gcs(file_data: bytes, filename: str, content_type: str) -> str:
     except Exception as e:
         logger.error(f"GCS upload failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to upload image")
-        
+    
 def get_db() -> Client:
     """Get Supabase client with service role key for full access"""
     url = os.getenv("SUPABASE_URL")
@@ -67,7 +67,7 @@ JWT_SECRET = os.getenv("JWT_SECRET")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_DAYS = 7
 def get_jwt_secret():
-    return os.getenv("JWT_SECRET")
+    return os.getenv("SUPABASE_JWT_SECRET")
 
 def make_jwt(user_id: str, email: str) -> str:
     """Create a JWT token for the user"""
