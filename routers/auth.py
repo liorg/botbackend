@@ -1,5 +1,5 @@
 """
-VERSION  3
+VERSION  5
 auth.py - Authentication & Settings API for VID
 FastAPI router with JWT authentication and Supabase integration
 
