@@ -1,5 +1,5 @@
 """
-VERSION 1
+VERSION 
 auth.py - Authentication & Settings API for VID
 FastAPI router with JWT authentication and Supabase integration
 
@@ -97,7 +97,7 @@ def decode_jwt(token: str) -> dict:
             payload = jwt.decode(
                 token, 
                 supabase_jwt_secret, 
-                algorithms=["HS256"],
+                algorithms=["HS256", "HS384", "HS512"],
                 audience="authenticated"
             )
             return {
@@ -109,8 +109,8 @@ def decode_jwt(token: str) -> dict:
             logger.warning("Token expired")
             raise HTTPException(status_code=401, detail="Token expired")
         except jwt.InvalidTokenError as e:
-            logger.warning(f"Invalid token: {e}")
-            pass  # Fall through to custom JWT
+            logger.warning(f"Supabase token invalid: {e}")
+            # Fall through to custom JWT
     
     # Fallback to custom JWT
     jwt_secret = get_jwt_secret()
@@ -118,25 +118,12 @@ def decode_jwt(token: str) -> dict:
         raise HTTPException(status_code=500, detail="JWT not configured")
     
     try:
-        return jwt.decode(token, jwt_secret, algorithms=[JWT_ALGORITHM])
+        return jwt.decode(token, jwt_secret, algorithms=["HS256", "HS384", "HS512"])
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    # Fallback to custom JWT
-    jwt_secret = get_jwt_secret()
-    if not jwt_secret:
-        raise HTTPException(status_code=500, detail="JWT_SECRET not configured")
-    
-    try:
-        return jwt.decode(token, jwt_secret, algorithms=[JWT_ALGORITHM])
-    except jwt.ExpiredSignatureError:
-        logger.warning("Token expired")
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError as e:
-        logger.warning(f"Invalid JWT token: {e}")
+        logger.warning(f"Custom token invalid: {e}")
         raise HTTPException(status_code=401, detail="Invalid token")
-
 def get_current_user(authorization: str = Header(None)) -> dict:
     """Dependency to get current user from JWT token"""
     if not authorization:
