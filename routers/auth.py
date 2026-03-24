@@ -85,7 +85,32 @@ def make_jwt(user_id: str, email: str) -> str:
     return jwt.encode(payload, jwt_secret, algorithm=JWT_ALGORITHM)
 
 def decode_jwt(token: str) -> dict:
-    """Decode and validate a JWT token"""
+    """Decode and validate a JWT token (supports Supabase JWT)"""
+    
+    # Get Supabase JWT Secret
+    supabase_jwt_secret = os.getenv("SUPABASE_JWT_SECRET")
+    
+    if supabase_jwt_secret:
+        try:
+            payload = jwt.decode(
+                token, 
+                supabase_jwt_secret, 
+                algorithms=["HS256"],
+                audience="authenticated"
+            )
+            return {
+                "uid": payload.get("sub"),
+                "sub": payload.get("email"),
+                "email": payload.get("email")
+            }
+        except jwt.ExpiredSignatureError:
+            logger.warning("Supabase token expired")
+            raise HTTPException(status_code=401, detail="Token expired")
+        except jwt.InvalidTokenError as e:
+            logger.warning(f"Invalid Supabase token: {e}")
+            # Fall through to try custom JWT
+    
+    # Fallback to custom JWT
     jwt_secret = get_jwt_secret()
     if not jwt_secret:
         raise HTTPException(status_code=500, detail="JWT_SECRET not configured")
@@ -98,7 +123,6 @@ def decode_jwt(token: str) -> dict:
     except jwt.InvalidTokenError as e:
         logger.warning(f"Invalid JWT token: {e}")
         raise HTTPException(status_code=401, detail="Invalid token")
-
 
 def get_current_user(authorization: str = Header(None)) -> dict:
     """Dependency to get current user from JWT token"""
