@@ -1,6 +1,8 @@
 """
+VERSION 1
 auth.py - Authentication & Settings API for VID
 FastAPI router with JWT authentication and Supabase integration
+
 """
 
 from fastapi import APIRouter, HTTPException, Header, Depends
@@ -87,7 +89,7 @@ def make_jwt(user_id: str, email: str) -> str:
 def decode_jwt(token: str) -> dict:
     """Decode and validate a JWT token (supports Supabase JWT)"""
     
-    # Get Supabase JWT Secret
+    # Try Supabase JWT first
     supabase_jwt_secret = os.getenv("SUPABASE_JWT_SECRET")
     
     if supabase_jwt_secret:
@@ -104,12 +106,23 @@ def decode_jwt(token: str) -> dict:
                 "email": payload.get("email")
             }
         except jwt.ExpiredSignatureError:
-            logger.warning("Supabase token expired")
+            logger.warning("Token expired")
             raise HTTPException(status_code=401, detail="Token expired")
         except jwt.InvalidTokenError as e:
-            logger.warning(f"Invalid Supabase token: {e}")
-            # Fall through to try custom JWT
+            logger.warning(f"Invalid token: {e}")
+            pass  # Fall through to custom JWT
     
+    # Fallback to custom JWT
+    jwt_secret = get_jwt_secret()
+    if not jwt_secret:
+        raise HTTPException(status_code=500, detail="JWT not configured")
+    
+    try:
+        return jwt.decode(token, jwt_secret, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
     # Fallback to custom JWT
     jwt_secret = get_jwt_secret()
     if not jwt_secret:
