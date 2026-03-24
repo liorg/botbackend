@@ -1,5 +1,5 @@
 """
-VERSION 
+VERSION  3
 auth.py - Authentication & Settings API for VID
 FastAPI router with JWT authentication and Supabase integration
 
@@ -16,6 +16,8 @@ from typing import Optional
 from fastapi import UploadFile, File
 from google.cloud import storage
 import uuid
+from functools import lru_cache
+import requests
 # Import centralized logging
 from logging_config import get_logger
 # 2. Add this constant after the JWT constants:
@@ -86,44 +88,59 @@ def make_jwt(user_id: str, email: str) -> str:
     }
     return jwt.encode(payload, jwt_secret, algorithm=JWT_ALGORITHM)
 
+@lru_cache(maxsize=1)
+def get_supabase_jwks():
+    """Fetch Supabase JWKS (cached)"""
+    url = f"{os.getenv('SUPABASE_URL')}/.well-known/jwks.json"
+    try:
+        resp = requests.get(url, timeout=10)
+        return resp.json()
+    except:
+        return None
+
 def decode_jwt(token: str) -> dict:
-    """Decode and validate a JWT token (supports Supabase JWT)"""
+    """Decode and validate a JWT token (supports Supabase JWT with ES256)"""
     
-    # Try Supabase JWT first
-    supabase_jwt_secret = os.getenv("SUPABASE_JWT_SECRET")
+    supabase_url = os.getenv("SUPABASE_URL")
     
-    if supabase_jwt_secret:
+    if supabase_url:
         try:
-            payload = jwt.decode(
-                token, 
-                supabase_jwt_secret, 
-                algorithms=["HS256", "HS384", "HS512"],
-                audience="authenticated"
-            )
-            return {
-                "uid": payload.get("sub"),
-                "sub": payload.get("email"),
-                "email": payload.get("email")
-            }
+            # Get JWKS
+            jwks = get_supabase_jwks()
+            if jwks:
+                from jwt import PyJWKClient
+                jwks_client = PyJWKClient(f"{supabase_url}/.well-known/jwks.json")
+                signing_key = jwks_client.get_signing_key_from_jwt(token)
+                
+                payload = jwt.decode(
+                    token,
+                    signing_key.key,
+                    algorithms=["ES256", "HS256"],
+                    audience="authenticated"
+                )
+                return {
+                    "uid": payload.get("sub"),
+                    "sub": payload.get("email"),
+                    "email": payload.get("email")
+                }
         except jwt.ExpiredSignatureError:
             logger.warning("Token expired")
             raise HTTPException(status_code=401, detail="Token expired")
-        except jwt.InvalidTokenError as e:
-            logger.warning(f"Supabase token invalid: {e}")
-            # Fall through to custom JWT
+        except Exception as e:
+            logger.warning(f"Supabase token error: {e}")
     
-    # Fallback to custom JWT
+    # Fallback to custom JWT (HS256)
     jwt_secret = get_jwt_secret()
     if not jwt_secret:
         raise HTTPException(status_code=500, detail="JWT not configured")
     
     try:
-        return jwt.decode(token, jwt_secret, algorithms=["HS256", "HS384", "HS512"])
+        return jwt.decode(token, jwt_secret, algorithms=["HS256"])
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError as e:
-        logger.warning(f"Custom token invalid: {e}")
+    except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+    
 def get_current_user(authorization: str = Header(None)) -> dict:
     """Dependency to get current user from JWT token"""
     if not authorization:
