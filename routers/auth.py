@@ -1,5 +1,5 @@
 """
-VERSION  6
+VERSION  7
 auth.py - Authentication & Settings API for VID
 FastAPI router with JWT authentication and Supabase integration
 
@@ -107,6 +107,7 @@ def decode_jwt(token: str) -> dict:
         user_response = db.auth.get_user(token)
         
         if user_response and user_response.user:
+            logger.info(f"Token verified with Supabase email={user.email}", extra={"action": "token_verified_supabase"})
             user = user_response.user
             return {
                 "uid": user.id,
@@ -115,12 +116,13 @@ def decode_jwt(token: str) -> dict:
             }
     except Exception as e:
         logger.warning(f"Supabase token verification failed: {e}")
-    
+    logger.info("Falling back to custom JWT verification", extra={"action": "token_verify_fallback"})
     # Option 2: Fallback to custom JWT (HS256)
     jwt_secret = get_jwt_secret()
     if jwt_secret:
         try:
             payload = jwt.decode(token, jwt_secret, algorithms=["HS256"])
+            logger.info(f"Token verified with custom JWT email={payload.get('sub')}", extra={"action": "token_verified_custom"})
             return payload
         except jwt.ExpiredSignatureError:
             raise HTTPException(status_code=401, detail="Token expired")
