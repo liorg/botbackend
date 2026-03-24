@@ -101,7 +101,7 @@ def get_supabase_jwks():
 def decode_jwt(token: str) -> dict:
     """Decode and validate a JWT token using Supabase"""
     
-    # Option 1: Use Supabase to verify the token
+    # Option 1: Use Supabase to verify the token from ui
     try:
         db = get_db()
         user_response = db.auth.get_user(token)
@@ -116,6 +116,8 @@ def decode_jwt(token: str) -> dict:
             }
     except Exception as e:
         logger.warning(f"Supabase token verification failed: {e}")
+    
+    #from postman
     logger.info("Falling back to custom JWT verification", extra={"action": "token_verify_fallback"})
     # Option 2: Fallback to custom JWT (HS256)
     jwt_secret = get_jwt_secret()
