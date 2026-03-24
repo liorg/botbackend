@@ -1,5 +1,5 @@
 """
-VERSION  8
+VERSION  9
 auth.py - Authentication & Settings API for VID
 FastAPI router with JWT authentication and Supabase integration
 
@@ -215,7 +215,7 @@ async def google_auth(request: GoogleTokenRequest):
         db.table("users").update({
             "last_login": datetime.utcnow().isoformat(),
             "google_id": google_id,
-            "avatar": picture if not user_row.get("avatar") else user_row.get("avatar"),
+           # "avatar": picture if not user_row.get("avatar") else user_row.get("avatar"),
         }).eq("id", user_row["id"]).execute()
         
         logger.info("Google login successful", extra={
