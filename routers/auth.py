@@ -1,5 +1,5 @@
 """
-VERSION  5
+VERSION  6
 auth.py - Authentication & Settings API for VID
 FastAPI router with JWT authentication and Supabase integration
 
@@ -99,48 +99,36 @@ def get_supabase_jwks():
         return None
 
 def decode_jwt(token: str) -> dict:
-    """Decode and validate a JWT token (supports Supabase JWT with ES256)"""
+    """Decode and validate a JWT token using Supabase"""
     
-    supabase_url = os.getenv("SUPABASE_URL")
-    
-    if supabase_url:
-        try:
-            # Get JWKS
-            jwks = get_supabase_jwks()
-            if jwks:
-                from jwt import PyJWKClient
-                jwks_client = PyJWKClient(f"{supabase_url}/.well-known/jwks.json")
-                signing_key = jwks_client.get_signing_key_from_jwt(token)
-                
-                payload = jwt.decode(
-                    token,
-                    signing_key.key,
-                    algorithms=["ES256", "HS256"],
-                    audience="authenticated"
-                )
-                return {
-                    "uid": payload.get("sub"),
-                    "sub": payload.get("email"),
-                    "email": payload.get("email")
-                }
-        except jwt.ExpiredSignatureError:
-            logger.warning("Token expired")
-            raise HTTPException(status_code=401, detail="Token expired")
-        except Exception as e:
-            logger.warning(f"Supabase token error: {e}")
-    
-    # Fallback to custom JWT (HS256)
-    jwt_secret = get_jwt_secret()
-    if not jwt_secret:
-        raise HTTPException(status_code=500, detail="JWT not configured")
-    
+    # Option 1: Use Supabase to verify the token
     try:
-        return jwt.decode(token, jwt_secret, algorithms=["HS256"])
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        db = get_db()
+        user_response = db.auth.get_user(token)
+        
+        if user_response and user_response.user:
+            user = user_response.user
+            return {
+                "uid": user.id,
+                "sub": user.email,
+                "email": user.email
+            }
+    except Exception as e:
+        logger.warning(f"Supabase token verification failed: {e}")
     
+    # Option 2: Fallback to custom JWT (HS256)
+    jwt_secret = get_jwt_secret()
+    if jwt_secret:
+        try:
+            payload = jwt.decode(token, jwt_secret, algorithms=["HS256"])
+            return payload
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(status_code=401, detail="Token expired")
+        except jwt.InvalidTokenError:
+            pass
+    
+    raise HTTPException(status_code=401, detail="Invalid token")
+  
 def get_current_user(authorization: str = Header(None)) -> dict:
     """Dependency to get current user from JWT token"""
     if not authorization:
