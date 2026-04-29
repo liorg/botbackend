@@ -47,4 +47,9 @@ uvicorn main:app --reload --port 8000
 
 ## API Docs
 
-לאחר הרצה: http://localhost:8000/docs
+לאחר הרצה: http://localhost:8000/d
+ocs
+
+## Compile
+python3 -m py_compile main.py && echo OK || echo FAIL
+python3 -m py_compile ./routers/auth.py && echo OK || echo FAIL

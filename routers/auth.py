@@ -253,10 +253,13 @@ async def google_auth(request: GoogleTokenRequest):
         }
 
         # Only fill avatar if the user has none (user-set avatar takes full priority)
-        if not user_row.get("avatar"):
-            gcs_avatar = await mirror_google_avatar_to_gcs(picture, str(user_row["id"]))
-            if gcs_avatar:
-                update_payload["avatar"] = gcs_avatar
+        current_avatar = user_row.get("avatar", "")
+        is_google_url = "googleusercontent.com" in current_avatar or "lh3.google" in current_avatar
+
+        if not current_avatar or is_google_url:
+          gcs_avatar = await mirror_google_avatar_to_gcs(picture, str(user_row["id"]))
+          if gcs_avatar:
+            update_payload["avatar"] = gcs_avatar
 
         db.table("users").update(update_payload).eq("id", user_row["id"]).execute()
 
