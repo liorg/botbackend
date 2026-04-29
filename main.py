@@ -77,9 +77,9 @@ async def shutdown():
 @app.get("/")
 async def root():
     return {
-        "name": "ScenarioBot API",
+        "name": "ScenarioBot",
         "version":version,
-        "status": "running"
+        "status": "running!!!"
     }
 
 # ── Health ────────────────────────────────────────────────────
