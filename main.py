@@ -10,9 +10,8 @@ from dotenv import load_dotenv
 # Import centralized logging
 from logging_config import get_logger, logging_middleware
 
-version="1.0.11"
 load_dotenv()  # ← חייב להיות לפני הכל
-
+version="1.0.12"
 logger = get_logger("main")
 
 app = FastAPI(title="ScenarioBot API", version=version)
