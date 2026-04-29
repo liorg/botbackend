@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 # Import centralized logging
 from logging_config import get_logger, logging_middleware
-version="1.0.8"
+version="1.0.9"
 load_dotenv()  # ← חייב להיות לפני הכל
 
 logger = get_logger("main")
