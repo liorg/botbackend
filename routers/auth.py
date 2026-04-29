@@ -453,23 +453,37 @@ async def forgot_password(request: ForgotPasswordRequest):
 
 @router.get("/settings")
 async def get_settings(current_user: dict = Depends(get_current_user)):
-    """Get current user settings"""
     user_id = current_user.get("uid")
-    logger.info("Get settings", extra={"action": "get_settings", "user_id": user_id})
-
     db = get_db()
 
-    # FIX: use .eq().execute() + check data, not .single() which throws on miss
     try:
         result = db.table("users").select("*").eq("id", user_id).execute()
     except Exception as e:
-        logger.error(f"Failed to get user settings: {e}", extra={"user_id": user_id})
         raise HTTPException(status_code=500, detail="שגיאה בטעינת הגדרות")
 
     if not result.data:
         raise HTTPException(status_code=404, detail="משתמש לא נמצא")
 
     user = result.data[0]
+    
+    # ── אם avatar ריק — נסה לשלוף מ-Supabase Auth metadata ──────────────
+    avatar = user.get("avatar") or ""
+    if not avatar:
+        try:
+            auth_user = db.auth.admin.get_user_by_id(user_id)
+            meta = auth_user.user.user_metadata or {} if auth_user.user else {}
+            google_picture = meta.get("avatar_url") or meta.get("picture") or ""
+            if google_picture:
+                # מיד mirror ל-GCS ושמור ב-DB
+                gcs_url = await mirror_google_avatar_to_gcs(google_picture, user_id)
+                if gcs_url:
+                    db.table("users").update({
+                        "avatar": gcs_url,
+                        "updated_at": datetime.utcnow().isoformat()
+                    }).eq("id", user_id).execute()
+                    avatar = gcs_url
+        except Exception as e:
+            logger.warning(f"Could not fetch auth metadata for avatar: {e}")
 
     return {
         "id": user.get("id"),
@@ -478,12 +492,11 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "name": user.get("name") or "",
         "mobile": user.get("mobile") or "",
         "lang": user.get("lang") or "he",
-        "avatar": user.get("avatar") or "",
+        "avatar": avatar,
         "package_type": user.get("package_type") or "basic",
         "created_at": user.get("created_at"),
         "updated_at": user.get("updated_at"),
     }
-
 
 @router.put("/settings")
 async def update_settings(
