@@ -27,7 +27,7 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             set -e
-            echo "WHOAMI :"
+            echo "WHOAMI ="
             whoami
             cd /home/lior/fastapi-app
             git reset --hard
