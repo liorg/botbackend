@@ -27,10 +27,10 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             set -e
-            echo "WHOAMI:"
+            echo "WHOAMI :"
             whoami
             cd /home/lior/fastapi-app
             git reset --hard
             git pull origin main
             ./venv/bin/pip install -r requirements.txt -q
-            sudo -n systemctl restart fastapi
+            sudo -n systemctl restart fastapi 
