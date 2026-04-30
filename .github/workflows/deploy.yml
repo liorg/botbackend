@@ -27,10 +27,8 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             set -e
-            git config --global --add safe.directory /home/lior/fastapi-app
             cd /home/lior/fastapi-app
             git reset --hard
             git pull origin main
             ./venv/bin/pip install -r requirements.txt -q
             sudo -n systemctl restart fastapi
-            sudo -n systemctl status fastapi --no-pager
