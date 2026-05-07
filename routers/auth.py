@@ -246,6 +246,12 @@ async def google_auth(request: GoogleTokenRequest):
     if existing.data:
         # ── Existing user ──────────────────────────────────────────────────
         user_row = existing.data[0]
+        current_avatar = user_row.get("avatar", "")
+
+        logger.info(f"DEBUG avatar in DB: '{current_avatar}'")
+        logger.info(f"DEBUG picture from Google: '{picture}'")
+        logger.info(f"DEBUG is_google: {'googleusercontent.com' in current_avatar}")
+        logger.info(f"DEBUG is_gcs: {'storage.googleapis.com/vid-michal-uploads' in current_avatar}")
 
         update_payload = {
             "last_login": datetime.utcnow().isoformat(),
