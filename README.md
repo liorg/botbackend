@@ -30,20 +30,8 @@ uvicorn main:app --reload --port 8000
 │   ├── scenarios.py     # CRUD /scenarios
 │   ├── schedules.py     # CRUD /schedules
 │   └── calls.py         # CRUD /calls + /messages
-└── sql/
-    ├── 01_users.sql
-    ├── 02_phones.sql
-    ├── 03_contacts.sql
-    ├── 04_scenarios.sql
-    ├── 05_schedules.sql
-    ├── 06_calls.sql
-    ├── 07_messages.sql
-    └── 08_rls.sql
-```
 
-## Supabase SQL
 
-הרץ את קבצי ה-SQL לפי הסדר (01 → 08) ב-Supabase SQL Editor.
 
 ## API Docs
 

@@ -256,10 +256,12 @@ async def google_auth(request: GoogleTokenRequest):
         current_avatar = user_row.get("avatar", "")
         is_google_url = "googleusercontent.com" in current_avatar or "lh3.google" in current_avatar
 
-        if not current_avatar or is_google_url:
-          gcs_avatar = await mirror_google_avatar_to_gcs(picture, str(user_row["id"]))
-          if gcs_avatar:
-            update_payload["avatar"] = gcs_avatar
+        is_gcs_url = "storage.googleapis.com/vid-michal-uploads" in current_avatar
+
+        if not current_avatar or (is_google_url and not is_gcs_url):
+             gcs_avatar = await mirror_google_avatar_to_gcs(picture, str(user_row["id"]))
+             if gcs_avatar and gcs_avatar != picture:
+                update_payload["avatar"] = gcs_avatar
 
         db.table("users").update(update_payload).eq("id", user_row["id"]).execute()
 
