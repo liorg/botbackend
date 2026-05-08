@@ -1,0 +1,222 @@
+{
+  "info": {
+    "name": "ScenarioBot API",
+    "description": "Step 1: Run 'Login' → token is saved automatically.\nStep 2: Run any other request — token is injected via {{access_token}}.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://vid.michal-solutions.com/api",
+      "type": "string"
+    },
+    {
+      "key": "access_token",
+      "value": "",
+      "type": "string",
+      "description": "Filled automatically after Login"
+    }
+  ],
+  "item": [
+    {
+      "name": "🔐 Auth",
+      "item": [
+        {
+          "name": "Login (get token)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.access_token) {",
+                  "    pm.collectionVariables.set('access_token', json.access_token);",
+                  "    console.log('✅ Token saved:', json.access_token.substring(0, 30) + '...');",
+                  "} else {",
+                  "    console.error('❌ No token in response:', JSON.stringify(json));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"your@email.com\",\n  \"password\": \"yourpassword\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "login"]
+            },
+            "description": "Returns access_token — saved automatically to {{access_token}}"
+          }
+        },
+        {
+          "name": "Get current user (me)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/me",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "me"]
+            }
+          }
+        },
+        {
+          "name": "Get settings",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/settings",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "settings"]
+            }
+          }
+        },
+        {
+          "name": "Health check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/auth/health",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "health"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "📱 Phones",
+      "item": [
+        {
+          "name": "List my phones",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/phones/",
+              "host": ["{{base_url}}"],
+              "path": ["phones", ""]
+            }
+          }
+        },
+        {
+          "name": "Provision phone (Step 1+2)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.phone_id) {",
+                  "    pm.collectionVariables.set('phone_id', json.phone_id);",
+                  "    console.log('✅ Phone ID saved:', json.phone_id);",
+                  "    console.log('Status:', json.status);",
+                  "    if (json.status === 'qr_ready') {",
+                  "        console.log('📷 QR ready — use Get QR Code to poll');",
+                  "    } else if (json.status === 'connected') {",
+                  "        console.log('✅ Already connected!');",
+                  "    }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"972504476645\",\n  \"nickname\": \"Test Phone\",\n  \"tag\": \"עסקי\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/phones/provision",
+              "host": ["{{base_url}}"],
+              "path": ["phones", "provision"]
+            },
+            "description": "Returns:\n- status=qr_ready + qr_image_base64 → scan QR\n- status=connected → already connected\n\nphone_id is saved automatically to {{phone_id}}"
+          }
+        },
+        {
+          "name": "Get QR code (poll until connected)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/phones/{{phone_id}}/qrcode",
+              "host": ["{{base_url}}"],
+              "path": ["phones", "{{phone_id}}", "qrcode"]
+            },
+            "description": "Poll this every few seconds.\nWhen status=connected the phone is ready."
+          }
+        },
+        {
+          "name": "Agents health check",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/phones/agents/health",
+              "host": ["{{base_url}}"],
+              "path": ["phones", "agents", "health"]
+            },
+            "description": "Shows all production agent hosts and their health.\nLoopback IPs (127.x / localhost) are excluded."
+          }
+        },
+        {
+          "name": "Logout phone (fresh QR)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/phones/{{phone_id}}/logout",
+              "host": ["{{base_url}}"],
+              "path": ["phones", "{{phone_id}}", "logout"]
+            }
+          }
+        },
+        {
+          "name": "Delete phone",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/phones/{{phone_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["phones", "{{phone_id}}"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

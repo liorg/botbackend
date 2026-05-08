@@ -42,3 +42,10 @@ ocs
 python3 -m py_compile main.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/auth.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/phones.py && echo OK || echo FAIL
+
+
+
+## Test Agent Alive
+
+sudo systemctl status whatsapp-manager
+sudo journalctl -u whatsapp-manager -n 50
