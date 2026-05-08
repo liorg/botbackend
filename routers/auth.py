@@ -1,14 +1,3 @@
-"""
-VERSION  10
-auth.py - Authentication & Settings API for VID
-FastAPI router with JWT authentication and Supabase integration
-
-FIXES v10:
-- Google avatar is now downloaded and re-uploaded to GCS (never stores Google URL)
-- Existing users: avatar only filled if empty (user-set avatar takes priority)
-- get_settings: safe handling when user not found (no .single() exception)
-- update_settings: robust result check
-"""
 
 from fastapi import APIRouter, HTTPException, Header, Depends
 from pydantic import BaseModel, EmailStr

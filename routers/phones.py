@@ -1,11 +1,3 @@
-"""
-phones.py — FastAPI router
-Proxy between UI and .NET Agent (WhatsAppDockerManager)
-
-FIXES:
-- Filters out 127.0.0.1 and localhost from agent hosts (dev machines)
-- Only real routable IPs are used as agents
-"""
 
 import os
 import httpx
