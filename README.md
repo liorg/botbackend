@@ -44,6 +44,11 @@ python3 -m py_compile ./routers/auth.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/phones.py && echo OK || echo FAIL
 python3 -m py_compile ./dependencies.py && echo OK || echo FAIL
 
+
+
+## LOGGING
+journalctl -u fastapi.service -n 50 --no-pager | grep -i "phones\|list\|uid"
+
 ## Test Agent Alive
 
 sudo systemctl status whatsapp-manager
