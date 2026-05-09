@@ -18,7 +18,7 @@ router = APIRouter(prefix="/phones", tags=["phones"])
 AGENT_PORT                    = int(os.getenv("AGENT_PORT", "5000"))
 AGENT_TOKEN                   = os.getenv("AGENT_TOKEN", "")
 AGENT_TIMEOUT                 = float(os.getenv("AGENT_TIMEOUT", "10"))
-HOST_HEARTBEAT_TIMEOUT_MINUTES = int(os.getenv("HOST_HEARTBEAT_TIMEOUT", "5"))
+HOST_HEARTBEAT_TIMEOUT_MINUTES = int(os.getenv("HOST_HEARTBEAT_TIMEOUT", "60"))
 
 # IPs that are never valid agents (dev / loopback)
 BLOCKED_IPS = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
@@ -109,10 +109,21 @@ async def _get_active_hosts(db: Client) -> list[dict]:
     return valid_hosts
 
 
-async def _check_host_health(ip: str) -> bool:
+async def _check_host_health(ip: str, db: Client = None, host_id: str = None) -> bool:
     try:
         data = await _agent_get(ip, "/api/host/health")
-        return data.get("status") == "healthy"
+        is_healthy = data.get("status") == "healthy"
+        
+        # עדכן heartbeat אוטומטית כשהשרת מגיב
+        if is_healthy and db and host_id:
+            try:
+                db.table("agent_hosts").update({
+                    "last_heartbeat": datetime.now(timezone.utc).isoformat()
+                }).eq("id", host_id).execute()
+            except Exception:
+                pass
+        
+        return is_healthy
     except Exception as e:
         logger.warning(f"Health check failed for {ip}: {e}")
         return False
@@ -127,7 +138,7 @@ async def _find_healthy_host(db: Client) -> Optional[dict]:
 
     for host in hosts:
         ip = host.get("ip_address", "")
-        if await _check_host_health(ip):
+        if await _check_host_health(ip, db, host["id"]):
             logger.info(f"Healthy host: {host['host_name']} ({ip})")
             return host
         logger.warning(f"Host {host['host_name']} ({ip}) failed health check")
@@ -274,7 +285,7 @@ async def agents_health(
 
     for host in hosts:
         ip      = host.get("ip_address", "")
-        healthy = await _check_host_health(ip)
+        healthy = await _check_host_health(ip, db, host["id"])
         results.append({
             "host_id":        host["id"],
             "host_name":      host["host_name"],
