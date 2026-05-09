@@ -188,12 +188,9 @@ async def list_phones(
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
-    result = (
-        db.table("phones")
-        .select("*")
-        .eq("user_id", user["uid"])
-        .execute()
-    )
+    logger.info(f"list_phones for user: {user['uid']}")
+    result = db.table("phones").select("*").eq("user_id", user["uid"]).execute()
+    logger.info(f"list_phones result: {result.data}")
     return result.data
 
 
@@ -205,10 +202,50 @@ async def provision_phone(
 ):
     """
     Provision a WhatsApp phone via the .NET agent.
-    Returns QR image (base64) or 'connected' if already linked.
+    Prevents duplicates — if phone already exists returns current QR.
     """
     logger.info(f"Provision: {body.phone_number} by user {user['uid']}")
 
+    # ── נקה את מספר הטלפון ────────────────────────────────────────────────
+    clean_number = "".join(filter(str.isdigit, body.phone_number))
+
+    # ── בדוק אם הטלפון כבר קיים ב-DB ─────────────────────────────────────
+    existing = db.table("phones").select("id, status, host_id").eq(
+        "user_id", user["uid"]
+    ).or_(
+        f"number.eq.{clean_number},number.eq.+{clean_number}"
+    ).execute()
+
+    if existing.data:
+        phone = existing.data[0]
+        logger.info(f"Phone already exists: {phone['id']} — returning current QR")
+
+        host = await _get_host_for_phone(db, phone["id"])
+        if not host:
+            host = await _find_healthy_host(db)
+
+        if host:
+            try:
+                data = await _agent_get(host["ip_address"], f"/api/phones/{phone['id']}/qrcode")
+                return {
+                    "phone_id":        phone["id"],
+                    "phone_number":    clean_number,
+                    "status":          data.get("status", "qr_ready"),
+                    "qr_image_base64": data.get("qrImageBase64"),
+                    "qr_code":         data.get("qr"),
+                    "message":         "טלפון קיים — מציג QR נוכחי",
+                    "host_name":       host["host_name"],
+                }
+            except Exception as e:
+                logger.warning(f"Could not fetch QR for existing phone: {e}")
+
+        return {
+            "phone_id": phone["id"],
+            "status":   phone.get("status", "active"),
+            "message":  "טלפון קיים",
+        }
+
+    # ── טלפון חדש — מצא host ושלח לאגנט ──────────────────────────────────
     host = await _find_healthy_host(db)
     if not host:
         raise HTTPException(
@@ -218,7 +255,7 @@ async def provision_phone(
 
     try:
         data = await _agent_post(host["ip_address"], "/api/phones/provision", {
-            "phoneNumber": body.phone_number,
+            "phoneNumber": clean_number,
             "nickname":    body.nickname,
             "tag":         body.tag,
             "userId":      user["uid"],
@@ -234,7 +271,7 @@ async def provision_phone(
         "phone_id":        data.get("phoneId"),
         "phone_number":    data.get("phoneNumber"),
         "label":           data.get("label"),
-        "status":          data.get("status"),           # "connected" | "qr_ready"
+        "status":          data.get("status"),
         "qr_image_base64": data.get("qrImageBase64"),
         "qr_code":         data.get("qrCode"),
         "qr_refresh_url":  data.get("qrRefreshUrl"),
