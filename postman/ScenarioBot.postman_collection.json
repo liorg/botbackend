@@ -15,6 +15,30 @@
       "value": "",
       "type": "string",
       "description": "Filled automatically after Login"
+    },
+    {
+      "key": "phone_id",
+      "value": "",
+      "type": "string",
+      "description": "Saved automatically after Provision"
+    },
+    {
+      "key": "contact_id",
+      "value": "",
+      "type": "string",
+      "description": "Saved automatically after creating contact"
+    },
+    {
+      "key": "ping_sender_id",
+      "value": "",
+      "type": "string",
+      "description": "Saved automatically after PING step 1"
+    },
+    {
+      "key": "reply_message_id",
+      "value": "",
+      "type": "string",
+      "description": "Saved automatically after polling replies"
     }
   ],
   "item": [
@@ -53,8 +77,7 @@
               "raw": "{{base_url}}/auth/login",
               "host": ["{{base_url}}"],
               "path": ["auth", "login"]
-            },
-            "description": "Returns access_token — saved automatically to {{access_token}}"
+            }
           }
         },
         {
@@ -68,32 +91,6 @@
               "raw": "{{base_url}}/auth/me",
               "host": ["{{base_url}}"],
               "path": ["auth", "me"]
-            }
-          }
-        },
-        {
-          "name": "Get settings",
-          "request": {
-            "method": "GET",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{access_token}}" }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/settings",
-              "host": ["{{base_url}}"],
-              "path": ["auth", "settings"]
-            }
-          }
-        },
-        {
-          "name": "Health check",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/auth/health",
-              "host": ["{{base_url}}"],
-              "path": ["auth", "health"]
             }
           }
         }
@@ -117,7 +114,7 @@
           }
         },
         {
-          "name": "Provision phone (Step 1+2)",
+          "name": "Provision phone",
           "event": [
             {
               "listen": "test",
@@ -127,12 +124,6 @@
                   "if (json.phone_id) {",
                   "    pm.collectionVariables.set('phone_id', json.phone_id);",
                   "    console.log('✅ Phone ID saved:', json.phone_id);",
-                  "    console.log('Status:', json.status);",
-                  "    if (json.status === 'qr_ready') {",
-                  "        console.log('📷 QR ready — use Get QR Code to poll');",
-                  "    } else if (json.status === 'connected') {",
-                  "        console.log('✅ Already connected!');",
-                  "    }",
                   "}"
                 ],
                 "type": "text/javascript"
@@ -147,74 +138,147 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"phone_number\": \"972504476645\",\n  \"nickname\": \"Test Phone\",\n  \"tag\": \"עסקי\"\n}",
-              "options": { "raw": { "language": "json" } }
+              "raw": "{\n  \"phone_number\": \"972504476645\",\n  \"nickname\": \"Test Phone\"\n}"
             },
             "url": {
               "raw": "{{base_url}}/phones/provision",
               "host": ["{{base_url}}"],
               "path": ["phones", "provision"]
-            },
-            "description": "Returns:\n- status=qr_ready + qr_image_base64 → scan QR\n- status=connected → already connected\n\nphone_id is saved automatically to {{phone_id}}"
+            }
           }
-        },
+        }
+      ]
+    },
+    {
+      "name": "👤 Contacts",
+      "item": [
         {
-          "name": "Get QR code (poll until connected)",
+          "name": "List contacts",
           "request": {
             "method": "GET",
             "header": [
               { "key": "Authorization", "value": "Bearer {{access_token}}" }
             ],
             "url": {
-              "raw": "{{base_url}}/phones/{{phone_id}}/qrcode",
+              "raw": "{{base_url}}/contacts?phone_id={{phone_id}}",
               "host": ["{{base_url}}"],
-              "path": ["phones", "{{phone_id}}", "qrcode"]
-            },
-            "description": "Poll this every few seconds.\nWhen status=connected the phone is ready."
-          }
-        },
-        {
-          "name": "Agents health check",
-          "request": {
-            "method": "GET",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{access_token}}" }
-            ],
-            "url": {
-              "raw": "{{base_url}}/phones/agents/health",
-              "host": ["{{base_url}}"],
-              "path": ["phones", "agents", "health"]
-            },
-            "description": "Shows all production agent hosts and their health.\nLoopback IPs (127.x / localhost) are excluded."
-          }
-        },
-        {
-          "name": "Logout phone (fresh QR)",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{access_token}}" }
-            ],
-            "url": {
-              "raw": "{{base_url}}/phones/{{phone_id}}/logout",
-              "host": ["{{base_url}}"],
-              "path": ["phones", "{{phone_id}}", "logout"]
+              "path": ["contacts"],
+              "query": [{ "key": "phone_id", "value": "{{phone_id}}" }]
             }
           }
         },
         {
-          "name": "Delete phone",
-          "request": {
-            "method": "DELETE",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{access_token}}" }
-            ],
-            "url": {
-              "raw": "{{base_url}}/phones/{{phone_id}}",
-              "host": ["{{base_url}}"],
-              "path": ["phones", "{{phone_id}}"]
+          "name": "🔔 PING Flow",
+          "item": [
+            {
+              "name": "Step 1: Send PING",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "const json = pm.response.json();",
+                      "if (json.success) {",
+                      "    pm.collectionVariables.set('contact_id', json.contact_id);",
+                      "    pm.collectionVariables.set('ping_sender_id', json.ping_sender_id);",
+                      "    console.log('✅ PING sent!');",
+                      "    console.log('Contact ID:', json.contact_id);",
+                      "    console.log('Ping ID:', json.ping_sender_id);",
+                      "    console.log('');",
+                      "    console.log('📊 Next: Poll Step 2 for replies');",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  { "key": "Authorization", "value": "Bearer {{access_token}}" },
+                  { "key": "Content-Type", "value": "application/json" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"phone_id\": \"{{phone_id}}\",\n  \"target_number\": \"972504476645\",\n  \"name\": \"דני מבדיקה\"\n}"
+                },
+                "url": {
+                  "raw": "{{base_url}}/contacts/create-from-ping",
+                  "host": ["{{base_url}}"],
+                  "path": ["contacts", "create-from-ping"]
+                }
+              }
+            },
+            {
+              "name": "Step 2: Poll for replies",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "const json = pm.response.json();",
+                      "const convs = json.conversations || [];",
+                      "console.log('Found', convs.length, 'conversations');",
+                      "if (convs.length > 0 && convs[0].replies?.length > 0) {",
+                      "    pm.collectionVariables.set('reply_message_id', convs[0].replies[0].id);",
+                      "    console.log('✅ Reply found! message_id saved');",
+                      "    console.log('📊 Next: Run Step 3 to link LID');",
+                      "} else {",
+                      "    console.log('⏳ No replies yet - try again');",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [
+                  { "key": "Authorization", "value": "Bearer {{access_token}}" }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/contacts/outgoing-with-replies/{{phone_id}}",
+                  "host": ["{{base_url}}"],
+                  "path": ["contacts", "outgoing-with-replies", "{{phone_id}}"]
+                }
+              }
+            },
+            {
+              "name": "Step 3: Link LID",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "const json = pm.response.json();",
+                      "if (json.success) {",
+                      "    console.log('✅ Contact linked!');",
+                      "    console.log('LID:', json.contact.lid?.substring(0, 40));",
+                      "    console.log('🎉 PING Flow complete!');",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  { "key": "Authorization", "value": "Bearer {{access_token}}" },
+                  { "key": "Content-Type", "value": "application/json" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"contact_id\": \"{{contact_id}}\",\n  \"message_id\": \"{{reply_message_id}}\"\n}"
+                },
+                "url": {
+                  "raw": "{{base_url}}/contacts/select-response",
+                  "host": ["{{base_url}}"],
+                  "path": ["contacts", "select-response"]
+                }
+              }
             }
-          }
+          ]
         }
       ]
     }

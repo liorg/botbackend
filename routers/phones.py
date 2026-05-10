@@ -215,58 +215,70 @@ async def provision_phone(
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
-    """
-    Provision a WhatsApp phone via the .NET agent.
-    Prevents duplicates — if phone already exists returns current QR.
-    """
     logger.info(f"Provision: {body.phone_number} by user {user['uid']}")
 
-    # נקה מספר
     clean_number = "".join(filter(str.isdigit, body.phone_number))
 
-    # בדוק אם הטלפון כבר קיים
+    # בדיקה גלובלית: האם המספר קיים אצל מישהו
     existing = (
         db.table("phones")
-        .select("id, status, host_id")
-        .eq("user_id", user["uid"])
+        .select("id, user_id, status, host_id")
         .or_(f"number.eq.{clean_number},number.eq.+{clean_number}")
         .execute()
     )
 
+    phone = None
+
     if existing.data:
         phone = existing.data[0]
+
+        # המספר שייך למשתמש אחר
+        if phone.get("user_id") != user["uid"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Phone number already belongs to another user"
+            )
+
         logger.info(f"Phone already exists: {phone['id']} — re-provisioning via agent")
 
+    # אם קיים אצל אותו משתמש — ננסה את ה-host שלו
+    host = None
+    if phone:
         host = await _get_host_for_phone(db, phone["id"])
-        if not host:
-            host = await _find_healthy_host(db)
-        if not host:
-            raise HTTPException(status_code=503, detail="No agent available")
 
-        try:
-            data = await _agent_post(host["ip_address"], "/api/phones/provision", {
-                "phoneNumber": clean_number,
-                "nickname":    body.nickname,
-                "tag":         body.tag,
-                "userId":      user["uid"],
-            })
-            return {
-                "phone_id":        data.get("phoneId") or phone["id"],
-                "phone_number":    clean_number,
-                "status":          data.get("status", "qr_ready"),
-                "qr_image_base64": data.get("qrImageBase64"),
-                "qr_code":         data.get("qrCode"),
-                "qr_refresh_url":  data.get("qrRefreshUrl"),
-                "message":         data.get("message"),
-                "host_name":       host["host_name"],
-            }
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Agent re-provision error: {e.response.text}")
-            raise HTTPException(status_code=502, detail=f"Agent error: {e.response.text}")
-        except httpx.RequestError as e:
-            logger.error(f"Agent unreachable during re-provision: {e}")
-            raise HTTPException(status_code=503, detail="Agent unreachable")
+    # אם לא קיים בכלל / אין host — נמצא agent בריא
+    if not host:
+        host = await _find_healthy_host(db)
 
+    if not host:
+        raise HTTPException(status_code=503, detail="No agent available")
+
+    try:
+        data = await _agent_post(host["ip_address"], "/api/phones/provision", {
+            "phoneNumber": clean_number,
+            "nickname": body.nickname,
+            "tag": body.tag,
+            "userId": user["uid"],
+        })
+
+        return {
+            "phone_id": data.get("phoneId") or (phone["id"] if phone else None),
+            "phone_number": clean_number,
+            "status": data.get("status", "qr_ready"),
+            "qr_image_base64": data.get("qrImageBase64"),
+            "qr_code": data.get("qrCode"),
+            "qr_refresh_url": data.get("qrRefreshUrl"),
+            "message": data.get("message"),
+            "host_name": host["host_name"],
+        }
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Agent provision error: {e.response.text}")
+        raise HTTPException(status_code=502, detail=f"Agent error: {e.response.text}")
+
+    except httpx.RequestError as e:
+        logger.error(f"Agent unreachable during provision: {e}")
+        raise HTTPException(status_code=503, detail="Agent unreachable")
 
 @router.get("/{phone_id}/qrcode")
 async def get_qr_code(
