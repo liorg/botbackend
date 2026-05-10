@@ -336,83 +336,54 @@ async def get_outgoing_with_replies(
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
-    """
-    Get outgoing messages with their replies (last 24 hours)
-    
-    Returns conversations structure:
-    [
-        {
-            "sent_message": {...},
-            "replies": [...]
-        }
-    ]
-    
-    UI polls this endpoint every 3 seconds to check for new replies
-    """
-    logger.info(f"[PING] Fetching conversations for phone {phone_id}", extra={
-        "action": "ping_poll",
-        "phone_id": phone_id
-    })
-    
     try:
-        # Get outgoing messages (last 24 hours)
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        
-        outgoing = (
-            db.table("messages")
-            .select("*, calls(id, phone_id, contact_id, contacts(id, number, name, lid))")
-            .eq("calls.phone_id", phone_id)
-            .eq("direction", False)
-            .gt("sent_at", cutoff)
-            .order("sent_at", desc=True)
+
+        calls = (
+            db.table("calls")
+            .select("id, phone_id, contact_id, contacts(id, number, name, lid)")
+            .eq("phone_id", phone_id)
+            .order("created_at", desc=True)
             .limit(50)
             .execute()
         )
 
         conversations = []
 
-        for msg in outgoing.data or []:
-            call = msg.get("calls")
-            contact = call.get("contacts") if call else None
-
-            if not call or not contact:
+        for call in calls.data or []:
+            contact = call.get("contacts")
+            if not contact:
                 continue
 
-            replies = (
+            messages = (
                 db.table("messages")
                 .select("*")
                 .eq("call_id", call["id"])
-                .eq("direction", True)
-                .gt("sent_at", msg["sent_at"])
+                .gt("sent_at", cutoff)
                 .order("sent_at", desc=False)
-                .limit(10)
                 .execute()
             )
 
+            msgs = messages.data or []
+            if not msgs:
+                continue
+
+            last_message = msgs[-1]
+
             conversations.append({
-                "sent_message": {
-                    "id": msg["id"],
-                    "content": msg["content"],
-                    "sent_at": msg["sent_at"],
-                    "contact_number": contact["number"],
-                    "contact_name": contact["name"],
+                "call_id": call["id"],
+                "contact": {
+                    "id": contact["id"],
+                    "name": contact["name"],
+                    "number": contact["number"],
+                    "lid": contact.get("lid"),
                 },
-                "replies": [
-                    {
-                        "id": r["id"],
-                        "content": r["content"],
-                        "sender": r.get("sender"),
-                        "sent_at": r["sent_at"],
-                        "leaf_id": r.get("leaf_id"),
-                    }
-                    for r in (replies.data or [])
-                ],
+                "last_message": last_message,
+                "messages": msgs,
             })
-                
-        logger.info(f"[PING] Found {len(conversations)} conversations")
-        
+
         return {"conversations": conversations}
-    
+
     except Exception as e:
         logger.error(f"[PING] Error fetching conversations: {e}")
         raise HTTPException(status_code=500, detail=str(e))
