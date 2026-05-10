@@ -360,36 +360,35 @@ async def get_outgoing_with_replies(
         
         outgoing = (
             db.table("messages")
-            .select("*, contacts(id, number, name, lid)")
-            .eq("call_id", phone_id)
-            .eq("direction", False)  # Outgoing only
+            .select("*, calls(id, phone_id, contact_id, contacts(id, number, name, lid))")
+            .eq("calls.phone_id", phone_id)
+            .eq("direction", False)
             .gt("sent_at", cutoff)
             .order("sent_at", desc=True)
             .limit(50)
             .execute()
         )
-        
+
         conversations = []
-        
+
         for msg in outgoing.data or []:
-            contact = msg.get("contacts")
-            
-            if not contact:
+            call = msg.get("calls")
+            contact = call.get("contacts") if call else None
+
+            if not call or not contact:
                 continue
-            
-            # Get replies (incoming messages from same contact after this message)
+
             replies = (
                 db.table("messages")
                 .select("*")
-                .eq("call_id", phone_id)
-                .eq("contact_id", contact["id"])
-                .eq("direction", True)  # Incoming only
+                .eq("call_id", call["id"])
+                .eq("direction", True)
                 .gt("sent_at", msg["sent_at"])
-                .order("sent_at", asc=True)
+                .order("sent_at", desc=False)
                 .limit(10)
                 .execute()
             )
-            
+
             conversations.append({
                 "sent_message": {
                     "id": msg["id"],
@@ -402,14 +401,14 @@ async def get_outgoing_with_replies(
                     {
                         "id": r["id"],
                         "content": r["content"],
-                        "sender": r.get("sender"),  # This is the LID!
+                        "sender": r.get("sender"),
                         "sent_at": r["sent_at"],
                         "leaf_id": r.get("leaf_id"),
                     }
                     for r in (replies.data or [])
                 ],
             })
-        
+                
         logger.info(f"[PING] Found {len(conversations)} conversations")
         
         return {"conversations": conversations}
