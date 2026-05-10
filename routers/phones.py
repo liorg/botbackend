@@ -364,7 +364,6 @@ async def logout_phone(
     except httpx.RequestError:
         raise HTTPException(status_code=503, detail="Agent unreachable")
 
-
 @router.patch("/{phone_id}")
 async def update_phone(
     phone_id: str,
