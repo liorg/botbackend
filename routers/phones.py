@@ -232,9 +232,14 @@ async def provision_phone(
     if existing.data:
         phone = existing.data[0]
 
-       
+        # המספר שייך למשתמש אחר
+        #if phone.get("user_id") != user["uid"]:
+        #    raise HTTPException(
+        #        status_code=409,
+        #        detail="Phone number already belongs to another user"
+        #    )
 
-        logger.info(f"Phone already exists: {phone['id']} — re-provisioning via agent")
+        #logger.info(f"Phone already exists: {phone['id']} — re-provisioning via agent")
 
     # אם קיים אצל אותו משתמש — ננסה את ה-host שלו
     host = None

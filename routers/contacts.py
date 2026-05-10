@@ -131,7 +131,7 @@ async def create_contact(
             "email": body.get("email"),
             "tag": body.get("tag", "חדש"),
             "lid": body.get("lid"),
-            "status": "active",
+
         }
         
         result = db.table("contacts").insert(contact_data).execute()
@@ -256,7 +256,6 @@ async def create_contact_from_ping(
                 "name": body.name or clean_number,
                 "lid": None,  # Will be filled after response
                 "tag": "חדש",
-                "status": "pending_ping",
             }
             
             result = db.table("contacts").insert(contact_data).execute()
@@ -471,7 +470,6 @@ async def select_response(
             db.table("contacts")
             .update({
                 "lid": selected_lid,
-                "status": "active",
                 "tag": "לקוח",
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
