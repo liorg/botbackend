@@ -27,6 +27,7 @@ ALLOWED_ORIGINS = [
     "http://localhost:5173",  # Vite dev server
     "http://localhost:3000",  # Alternative dev server
     "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",  # ✅ הוסף את זה!
 ]
 
 # In development, you might want to allow all origins
