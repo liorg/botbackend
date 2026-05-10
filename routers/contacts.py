@@ -393,32 +393,18 @@ async def get_outgoing_with_replies(
 # PING Flow - Step 3: Select response and link LID
 # ══════════════════════════════════════════════════════════════════════
 
+# בתוך select_response - שלב 3
 @router.post("/contacts/select-response")
 async def select_response(
     body: SelectResponseRequest,
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
-    """
-    User selected a reply → update contact with its LID
-    
-    Flow:
-    1. Get the selected message
-    2. Extract LID from sender field
-    3. Update contact with LID
-    4. Change status to 'active' and tag to 'לקוח'
-    """
-    logger.info(f"[PING] Selecting response {body.message_id} for contact {body.contact_id}", extra={
-        "action": "ping_select",
-        "contact_id": body.contact_id,
-        "message_id": body.message_id
-    })
-    
     try:
         # Get the selected message
         message = (
             db.table("messages")
-            .select("sender, leaf_id, call_id")
+            .select("sender, leaf_id, call_id, content")  # 🔴 הוסף content
             .eq("id", body.message_id)
             .single()
             .execute()
@@ -428,21 +414,38 @@ async def select_response(
             raise HTTPException(status_code=404, detail="Message not found")
         
         selected_lid = message.data.get("sender")
+        message_content = message.data.get("content", {})
+        
+        # ✅ שלוף את השם מWhatsApp (אם קיים)
+        whatsapp_name = None
+        if isinstance(message_content, dict):
+            # נסה למצוא שם מהמבנה של WhatsApp message
+            whatsapp_name = (
+                message_content.get("pushName") or 
+                message_content.get("notifyName") or
+                message_content.get("verifiedBizName")
+            )
         
         if not selected_lid:
             raise HTTPException(
                 status_code=400,
-                detail="Selected message has no LID (sender field is empty)"
+                detail="Selected message has no LID"
             )
         
-        # Update contact with the LID
+        # ✅ Update contact עם LID + WhatsApp name
+        update_data = {
+            "lid": selected_lid,
+            "tag": "לקוח",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        
+        # רק אם יש whatsapp_name - תעדכן גם אותו
+        if whatsapp_name:
+            update_data["whatsapp_name"] = whatsapp_name
+        
         result = (
             db.table("contacts")
-            .update({
-                "lid": selected_lid,
-                "tag": "לקוח",
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            })
+            .update(update_data)
             .eq("id", body.contact_id)
             .execute()
         )
@@ -450,7 +453,20 @@ async def select_response(
         if not result.data:
             raise HTTPException(status_code=404, detail="Contact not found")
         
-        logger.info(f"[PING] Successfully linked contact {body.contact_id} with LID {selected_lid[:30]}...")
+        logger.info(
+            f"[PING] Contact {body.contact_id} linked - "
+            f"LID: {selected_lid[:30]}... | "
+            f"WhatsApp Name: {whatsapp_name or 'N/A'}"
+        )
+        
+        # ✅ Mark ping_sender as completed
+        try:
+            db.table("ping_sender").update({
+                "status": "completed",
+                "matched_contact_id": body.contact_id,
+            }).eq("contact_id", body.contact_id).eq("status", "pending").execute()
+        except Exception as e:
+            logger.warning(f"Failed to update ping_sender: {e}")
         
         return {
             "success": True,
