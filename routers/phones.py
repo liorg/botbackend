@@ -235,66 +235,37 @@ async def provision_phone(
 
     if existing.data:
         phone = existing.data[0]
-        logger.info(f"Phone already exists: {phone['id']} — returning current QR")
+        logger.info(f"Phone already exists: {phone['id']} — re-provisioning via agent")
 
         host = await _get_host_for_phone(db, phone["id"])
         if not host:
             host = await _find_healthy_host(db)
+        if not host:
+            raise HTTPException(status_code=503, detail="No agent available")
 
-        if host:
-            try:
-                data = await _agent_get(host["ip_address"], f"/api/phones/{phone['id']}/qrcode")
-                return {
-                    "phone_id":        phone["id"],
-                    "phone_number":    clean_number,
-                    "status":          data.get("status", "qr_ready"),
-                    "qr_image_base64": data.get("qrImageBase64"),
-                    "qr_code":         data.get("qr"),
-                    "message":         "טלפון קיים — מציג QR נוכחי",
-                    "host_name":       host["host_name"],
-                }
-            except Exception as e:
-                logger.warning(f"Could not fetch QR for existing phone: {e}")
-
-        return {
-            "phone_id": phone["id"],
-            "status":   phone.get("status", "active"),
-            "message":  "טלפון קיים",
-        }
-
-    # טלפון חדש
-    host = await _find_healthy_host(db)
-    if not host:
-        raise HTTPException(
-            status_code=503,
-            detail="No available agent host — all hosts are offline, unreachable, or dev-only IPs",
-        )
-
-    try:
-        data = await _agent_post(host["ip_address"], "/api/phones/provision", {
-            "phoneNumber": clean_number,
-            "nickname":    body.nickname,
-            "tag":         body.tag,
-            "userId":      user["uid"],
-        })
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Agent provision error {e.response.status_code}: {e.response.text}")
-        raise HTTPException(status_code=502, detail=f"Agent error: {e.response.text}")
-    except httpx.RequestError as e:
-        logger.error(f"Agent unreachable: {e}")
-        raise HTTPException(status_code=503, detail="Agent unreachable during provision")
-
-    return {
-        "phone_id":        data.get("phoneId"),
-        "phone_number":    data.get("phoneNumber"),
-        "label":           data.get("label"),
-        "status":          data.get("status"),
-        "qr_image_base64": data.get("qrImageBase64"),
-        "qr_code":         data.get("qrCode"),
-        "qr_refresh_url":  data.get("qrRefreshUrl"),
-        "message":         data.get("message"),
-        "host_name":       host["host_name"],
-    }
+        try:
+            data = await _agent_post(host["ip_address"], "/api/phones/provision", {
+                "phoneNumber": clean_number,
+                "nickname":    body.nickname,
+                "tag":         body.tag,
+                "userId":      user["uid"],
+            })
+            return {
+                "phone_id":        data.get("phoneId") or phone["id"],
+                "phone_number":    clean_number,
+                "status":          data.get("status", "qr_ready"),
+                "qr_image_base64": data.get("qrImageBase64"),
+                "qr_code":         data.get("qrCode"),
+                "qr_refresh_url":  data.get("qrRefreshUrl"),
+                "message":         data.get("message"),
+                "host_name":       host["host_name"],
+            }
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Agent re-provision error: {e.response.text}")
+            raise HTTPException(status_code=502, detail=f"Agent error: {e.response.text}")
+        except httpx.RequestError as e:
+            logger.error(f"Agent unreachable during re-provision: {e}")
+            raise HTTPException(status_code=503, detail="Agent unreachable")
 
 
 @router.get("/{phone_id}/qrcode")
