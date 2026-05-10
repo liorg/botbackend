@@ -418,7 +418,7 @@ async def select_response(
         # Get the selected message
         message = (
             db.table("messages")
-            .select("sender, leaf_id, contact_id")
+            .select("sender, leaf_id, call_id")
             .eq("id", body.message_id)
             .single()
             .execute()
