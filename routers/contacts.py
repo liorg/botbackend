@@ -355,17 +355,19 @@ async def get_outgoing_with_replies(
             .execute()
         )
 
-        conversations = []
+        # קבץ לפי contact_id — מניעת כפילות כשיש כמה calls לאותו contact
+        contact_map = {}
 
         for call in calls.data or []:
             contact = call.get("contacts")
             if not contact:
                 continue
 
-            # הצג רק contacts שטרם קושרו (draft או חדש)
-            # contacts עם tag=לקוח כבר מקושרים — לא צריכים להופיע כאן
+            # הצג רק contacts שטרם קושרו
             if contact.get("tag") not in ("draft", "חדש", None):
                 continue
+
+            contact_id = contact["id"]
 
             messages = (
                 db.table("messages")
@@ -380,21 +382,38 @@ async def get_outgoing_with_replies(
             if not msgs:
                 continue
 
-            last_message = msgs[-1]
+            if contact_id not in contact_map:
+                # contact חדש — צור רשומה
+                contact_map[contact_id] = {
+                    "call_id": call["id"],
+                    "contact": {
+                        "id": contact["id"],
+                        "name": contact["name"],
+                        "number": contact["number"],
+                        "lid": contact.get("lid"),
+                        "tag": contact.get("tag"),
+                    },
+                    "messages": msgs,
+                    "last_message": msgs[-1],
+                }
+            else:
+                # contact קיים — מזג את ההודעות
+                existing_msgs = contact_map[contact_id]["messages"]
+                all_msgs = existing_msgs + msgs
+                # מיין לפי sent_at
+                all_msgs.sort(key=lambda m: m.get("sent_at", ""))
+                # הסר כפילויות לפי whatsapp_message_id
+                seen = set()
+                unique_msgs = []
+                for m in all_msgs:
+                    key = m.get("whatsapp_message_id") or m.get("id")
+                    if key not in seen:
+                        seen.add(key)
+                        unique_msgs.append(m)
+                contact_map[contact_id]["messages"] = unique_msgs
+                contact_map[contact_id]["last_message"] = unique_msgs[-1]
 
-            conversations.append({
-                "call_id": call["id"],
-                "contact": {
-                    "id": contact["id"],
-                    "name": contact["name"],
-                    "number": contact["number"],
-                    "lid": contact.get("lid"),
-                    "tag": contact.get("tag"),
-                },
-                "last_message": last_message,
-                "messages": msgs,
-            })
-
+        conversations = list(contact_map.values())
         return {"conversations": conversations}
 
     except Exception as e:
