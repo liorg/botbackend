@@ -54,3 +54,8 @@ journalctl -u fastapi.service -n 50 --no-pager | grep -i "phones\|list\|uid"
 
 sudo systemctl status whatsapp-manager
 sudo journalctl -u whatsapp-manager -n 50
+
+## Git
+git add .
+git commit --m 'version 1.x'
+git push

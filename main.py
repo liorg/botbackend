@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from logging_config import get_logger, logging_middleware
 
 load_dotenv()  # ← חייב להיות לפני הכל
-version="1.0.0.22"
+version="1.0.0.23"
 logger = get_logger("main")
 
 app = FastAPI(title="ScenarioBot API", version=version)
@@ -27,17 +27,18 @@ ALLOWED_ORIGINS = [
     "http://localhost:5173",  # Vite dev server
     "http://localhost:3000",  # Alternative dev server
     "http://127.0.0.1:5173",
-    "http://127.0.0.1:5174",  # ✅ הוסף את זה!
+    "http://127.0.0.1:5174",  # 
+    
 ]
 
 # In development, you might want to allow all origins
-if os.getenv("ENV", "production") == "development":
-    ALLOWED_ORIGINS = ["*"]
+#if os.getenv("ENV", "production") == "development":
+ALLOWED_ORIGINS = ["*"]
  
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=False,#CHANGE True 
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=[
         "Content-Type",
