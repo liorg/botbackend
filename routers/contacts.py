@@ -143,7 +143,6 @@ async def create_contact(
 
 
 @router.patch("/contacts/{contact_id}")
-@router.put("/contacts/{contact_id}")
 async def update_contact(
     contact_id: str,
     body: UpdateContactRequest,
@@ -250,7 +249,7 @@ async def create_contact_from_ping(
             contact = existing.data[0]
             logger.info(f"[PING] Contact already exists: {contact['id']}")
         else:
-            # Create new temporary contact (upsert to be safe)
+            # Create new temporary contact
             contact_data = {
                 "phone_id": body.phone_id,
                 "number": clean_number,
@@ -259,12 +258,9 @@ async def create_contact_from_ping(
                 "tag": "חדש",
             }
             
-            result = db.table("contacts").upsert(
-                contact_data,
-                on_conflict="phone_id,number"
-            ).execute()
+            result = db.table("contacts").insert(contact_data).execute()
             contact = result.data[0]
-            logger.info(f"[PING] Upserted contact: {contact['id']}")
+            logger.info(f"[PING] Created new contact: {contact['id']}")
         
         # Get agent IP
         agent_info = await _get_agent_ip_for_phone(db, body.phone_id)
@@ -340,12 +336,19 @@ async def get_outgoing_with_replies(
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
+    """
+    שלב 2 בוויזארד — מחזיר את כל ה-contacts עם הודעות:
+    - contacts עם tag=draft (נוצרו ע"י webhook מהודעות נכנסות)
+    - contact עם tag=חדש (נוצר ע"י PING, ממתין לקישור)
+    המשתמש יבחר מי הלקוח האמיתי ויקשר אותו.
+    """
     try:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
 
+        # שלוף את כל ה-calls תחת phone זה
         calls = (
             db.table("calls")
-            .select("id, phone_id, contact_id, contacts(id, number, name, lid)")
+            .select("id, phone_id, contact_id, contacts(id, number, name, lid, tag)")
             .eq("phone_id", phone_id)
             .order("created_at", desc=True)
             .limit(50)
@@ -357,6 +360,11 @@ async def get_outgoing_with_replies(
         for call in calls.data or []:
             contact = call.get("contacts")
             if not contact:
+                continue
+
+            # הצג רק contacts שטרם קושרו (draft או חדש)
+            # contacts עם tag=לקוח כבר מקושרים — לא צריכים להופיע כאן
+            if contact.get("tag") not in ("draft", "חדש", None):
                 continue
 
             messages = (
@@ -381,6 +389,7 @@ async def get_outgoing_with_replies(
                     "name": contact["name"],
                     "number": contact["number"],
                     "lid": contact.get("lid"),
+                    "tag": contact.get("tag"),
                 },
                 "last_message": last_message,
                 "messages": msgs,
