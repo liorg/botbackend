@@ -143,6 +143,7 @@ async def create_contact(
 
 
 @router.patch("/contacts/{contact_id}")
+@router.put("/contacts/{contact_id}")
 async def update_contact(
     contact_id: str,
     body: UpdateContactRequest,
@@ -249,7 +250,7 @@ async def create_contact_from_ping(
             contact = existing.data[0]
             logger.info(f"[PING] Contact already exists: {contact['id']}")
         else:
-            # Create new temporary contact
+            # Create new temporary contact (upsert to be safe)
             contact_data = {
                 "phone_id": body.phone_id,
                 "number": clean_number,
@@ -258,9 +259,12 @@ async def create_contact_from_ping(
                 "tag": "חדש",
             }
             
-            result = db.table("contacts").insert(contact_data).execute()
+            result = db.table("contacts").upsert(
+                contact_data,
+                on_conflict="phone_id,number"
+            ).execute()
             contact = result.data[0]
-            logger.info(f"[PING] Created new contact: {contact['id']}")
+            logger.info(f"[PING] Upserted contact: {contact['id']}")
         
         # Get agent IP
         agent_info = await _get_agent_ip_for_phone(db, body.phone_id)
