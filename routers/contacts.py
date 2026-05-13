@@ -358,14 +358,14 @@ async def get_outgoing_with_replies(
         # סעיף 2: שלוף את כל whatsapp_message_id של PING שנשלחו — כדי לסנן אותם מהתצוגה
         ping_senders = (
             db.table("ping_sender")
-            .select("whatsapp_message_id")
+            .select("ping_message_id")
             .eq("phone_id", phone_id)
             .execute()
         )
         ping_message_ids = {
-            row["whatsapp_message_id"]
+            row["ping_message_id"]
             for row in (ping_senders.data or [])
-            if row.get("whatsapp_message_id")
+            if row.get("ping_message_id")
         }
 
         # קבץ לפי contact_id — מניעת כפילות כשיש כמה calls לאותו contact
