@@ -355,19 +355,6 @@ async def get_outgoing_with_replies(
             .execute()
         )
 
-        # שלוף את כל contact_id שיזמו PING — אלה לא מוצגים בשלב 2
-        ping_senders = (
-            db.table("ping_sender")
-            .select("contact_id")
-            .eq("phone_id", phone_id)
-            .execute()
-        )
-        ping_contact_ids = {
-            row["contact_id"]
-            for row in (ping_senders.data or [])
-            if row.get("contact_id")
-        }
-
         # קבץ לפי contact_id — מניעת כפילות כשיש כמה calls לאותו contact
         contact_map = {}
 
@@ -376,7 +363,7 @@ async def get_outgoing_with_replies(
             if not contact:
                 continue
 
-            # סעיף 3: דלג על contacts שכבר קושרו סופית (tag=לקוח)
+            # דלג על contacts שכבר קושרו סופית (tag=לקוח)
             if contact.get("tag") == "לקוח":
                 continue
 
@@ -385,10 +372,6 @@ async def get_outgoing_with_replies(
                 continue
 
             contact_id = contact["id"]
-
-            # דלג על contacts שיזמו PING — הם לא שיחות נכנסות
-            if contact_id in ping_contact_ids:
-                continue
 
             # שלוף רק הודעות נכנסות
             messages = (
