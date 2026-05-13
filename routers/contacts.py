@@ -355,6 +355,19 @@ async def get_outgoing_with_replies(
             .execute()
         )
 
+        # סעיף 2: שלוף את כל whatsapp_message_id של PING שנשלחו — כדי לסנן אותם מהתצוגה
+        ping_senders = (
+            db.table("ping_sender")
+            .select("whatsapp_message_id")
+            .eq("phone_id", phone_id)
+            .execute()
+        )
+        ping_message_ids = {
+            row["whatsapp_message_id"]
+            for row in (ping_senders.data or [])
+            if row.get("whatsapp_message_id")
+        }
+
         # קבץ לפי contact_id — מניעת כפילות כשיש כמה calls לאותו contact
         contact_map = {}
 
@@ -363,32 +376,54 @@ async def get_outgoing_with_replies(
             if not contact:
                 continue
 
-            # הצג רק contacts שטרם קושרו
+            # סעיף 3: דלג על contacts שכבר יש להם lid מאוכלס
+            if contact.get("lid"):
+                continue
+
+            # הצג רק contacts שטרם קושרו (draft / חדש)
             if contact.get("tag") not in ("draft", "חדש", None):
                 continue
 
             contact_id = contact["id"]
 
+            # סעיף 2: שלוף רק הודעות נכנסות, וסנן הודעות PING יוצאות
             messages = (
                 db.table("messages")
                 .select("*")
                 .eq("call_id", call["id"])
+                .eq("direction", "incoming")
                 .gt("sent_at", cutoff)
                 .order("sent_at", desc=False)
                 .execute()
             )
 
-            msgs = messages.data or []
+            msgs = [
+                m for m in (messages.data or [])
+                if m.get("whatsapp_message_id") not in ping_message_ids
+            ]
+
             if not msgs:
                 continue
 
+            # סעיף 1: הצג שם — אם יש שם אמיתי השתמש בו, אחרת נסה מתוכן ההודעה
+            display_name = contact.get("name") or contact.get("number")
+            if not display_name or display_name == contact.get("number"):
+                first_content = msgs[0].get("content", {})
+                if isinstance(first_content, dict):
+                    wa_name = (
+                        first_content.get("pushName")
+                        or first_content.get("notifyName")
+                        or first_content.get("verifiedBizName")
+                    )
+                    if wa_name:
+                        display_name = wa_name
+
             if contact_id not in contact_map:
-                # contact חדש — צור רשומה
                 contact_map[contact_id] = {
                     "call_id": call["id"],
                     "contact": {
                         "id": contact["id"],
-                        "name": contact["name"],
+                        "name": display_name,          # סעיף 1: שם ולא מספר
                         "number": contact["number"],
                         "lid": contact.get("lid"),
                         "tag": contact.get("tag"),
@@ -400,9 +435,7 @@ async def get_outgoing_with_replies(
                 # contact קיים — מזג את ההודעות
                 existing_msgs = contact_map[contact_id]["messages"]
                 all_msgs = existing_msgs + msgs
-                # מיין לפי sent_at
                 all_msgs.sort(key=lambda m: m.get("sent_at", ""))
-                # הסר כפילויות לפי whatsapp_message_id
                 seen = set()
                 unique_msgs = []
                 for m in all_msgs:
