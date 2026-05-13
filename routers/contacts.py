@@ -376,8 +376,8 @@ async def get_outgoing_with_replies(
             if not contact:
                 continue
 
-            # סעיף 3: דלג על contacts שכבר יש להם lid מאוכלס
-            if contact.get("lid"):
+            # סעיף 3: דלג על contacts שכבר קושרו סופית (tag=לקוח)
+            if contact.get("tag") == "לקוח":
                 continue
 
             # הצג רק contacts שטרם קושרו (draft / חדש)
