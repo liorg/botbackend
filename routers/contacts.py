@@ -355,17 +355,17 @@ async def get_outgoing_with_replies(
             .execute()
         )
 
-        # סעיף 2: שלוף את כל whatsapp_message_id של PING שנשלחו — כדי לסנן אותם מהתצוגה
+        # שלוף את כל contact_id שיזמו PING — אלה לא מוצגים בשלב 2
         ping_senders = (
             db.table("ping_sender")
-            .select("ping_message_id")
+            .select("contact_id")
             .eq("phone_id", phone_id)
             .execute()
         )
-        ping_message_ids = {
-            row["ping_message_id"]
+        ping_contact_ids = {
+            row["contact_id"]
             for row in (ping_senders.data or [])
-            if row.get("ping_message_id")
+            if row.get("contact_id")
         }
 
         # קבץ לפי contact_id — מניעת כפילות כשיש כמה calls לאותו contact
@@ -386,21 +386,22 @@ async def get_outgoing_with_replies(
 
             contact_id = contact["id"]
 
-            # סעיף 2: שלוף רק הודעות נכנסות, וסנן הודעות PING יוצאות
+            # דלג על contacts שיזמו PING — הם לא שיחות נכנסות
+            if contact_id in ping_contact_ids:
+                continue
+
+            # שלוף רק הודעות נכנסות
             messages = (
                 db.table("messages")
                 .select("*")
                 .eq("call_id", call["id"])
-                .eq("direction", "incoming")
+                .eq("direction", True)
                 .gt("sent_at", cutoff)
                 .order("sent_at", desc=False)
                 .execute()
             )
 
-            msgs = [
-                m for m in (messages.data or [])
-                if m.get("whatsapp_message_id") not in ping_message_ids
-            ]
+            msgs = messages.data or []
 
             if not msgs:
                 continue
