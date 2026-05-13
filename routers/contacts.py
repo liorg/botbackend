@@ -81,7 +81,23 @@ def _is_valid_ip(ip: str) -> bool:
 # ══════════════════════════════════════════════════════════════════════
 # CRUD Operations
 # ══════════════════════════════════════════════════════════════════════
-
+@router.get("/calls/{call_id}/messages")
+async def get_call_messages(
+    call_id: str,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    try:
+        messages = (
+            db.table("messages")
+            .select("*")
+            .eq("call_id", call_id)
+            .order("sent_at", desc=False)
+            .execute()
+        )
+        return {"messages": messages.data or []}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 @router.get("/contacts")
 async def list_contacts(
     phone_id: str,
