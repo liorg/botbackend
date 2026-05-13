@@ -350,7 +350,7 @@ async def get_outgoing_with_replies(
             db.table("calls")
             .select("id, phone_id, contact_id, contacts(id, number, name, lid, tag)")
             .eq("phone_id", phone_id)
-            .order("created_at", desc=True)
+            .order("started_at", desc=True)
             .limit(50)
             .execute()
         )
