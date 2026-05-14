@@ -98,6 +98,8 @@ async def get_call_messages(
         return {"messages": messages.data or []}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/contacts")
 async def list_contacts(
     phone_id: str,
@@ -147,7 +149,6 @@ async def create_contact(
             "email": body.get("email"),
             "tag": body.get("tag", "חדש"),
             "lid": body.get("lid"),
-
         }
         
         result = db.table("contacts").insert(contact_data).execute()
@@ -230,14 +231,6 @@ async def create_contact_from_ping(
 ):
     """
     Step 1: Create temporary contact and send PING
-    
-    Flow:
-    1. Clean and validate phone number
-    2. Check if contact already exists
-    3. Create temporary contact (lid=null)
-    4. Get agent IP from phone's host
-    5. Send PING via .NET Agent
-    6. Return contact_id + ping_sender_id for tracking
     """
     logger.info(f"[PING] Creating contact from ping: {body.target_number}", extra={
         "action": "ping_create",
@@ -245,14 +238,12 @@ async def create_contact_from_ping(
         "target": body.target_number
     })
     
-    # Clean phone number
     clean_number = "".join(filter(str.isdigit, body.target_number))
     
     if len(clean_number) < 7 or len(clean_number) > 15:
         raise HTTPException(status_code=400, detail="Invalid phone number length (7-15 digits)")
     
     try:
-        # Check if contact exists
         existing = (
             db.table("contacts")
             .select("*")
@@ -265,12 +256,11 @@ async def create_contact_from_ping(
             contact = existing.data[0]
             logger.info(f"[PING] Contact already exists: {contact['id']}")
         else:
-            # Create new temporary contact
             contact_data = {
                 "phone_id": body.phone_id,
                 "number": clean_number,
                 "name": body.name or clean_number,
-                "lid": None,  # Will be filled after response
+                "lid": None,
                 "tag": "חדש",
             }
             
@@ -278,7 +268,6 @@ async def create_contact_from_ping(
             contact = result.data[0]
             logger.info(f"[PING] Created new contact: {contact['id']}")
         
-        # Get agent IP
         agent_info = await _get_agent_ip_for_phone(db, body.phone_id)
         
         if not agent_info:
@@ -295,7 +284,6 @@ async def create_contact_from_ping(
                 detail=f"Invalid agent IP: {agent_ip} (localhost not allowed in production)"
             )
         
-        # Send PING via .NET Agent
         jid = f"{clean_number}@s.whatsapp.net"
         agent_url = f"http://{agent_ip}:5000/api/phones/{body.phone_id}/send/ping"
         
@@ -325,16 +313,10 @@ async def create_contact_from_ping(
     
     except httpx.HTTPStatusError as e:
         logger.error(f"[PING] Agent HTTP error: {e.response.status_code} - {e.response.text}")
-        raise HTTPException(
-            status_code=502,
-            detail=f"Agent returned error: {e.response.text}"
-        )
+        raise HTTPException(status_code=502, detail=f"Agent returned error: {e.response.text}")
     except httpx.RequestError as e:
         logger.error(f"[PING] Agent unreachable: {e}")
-        raise HTTPException(
-            status_code=503,
-            detail=f"Cannot reach agent at {agent_ip}. Check if .NET service is running."
-        )
+        raise HTTPException(status_code=503, detail=f"Cannot reach agent at {agent_ip}. Check if .NET service is running.")
     except HTTPException:
         raise
     except Exception as e:
@@ -353,47 +335,31 @@ async def get_outgoing_with_replies(
     db: Client = Depends(get_supabase),
 ):
     """
-    שלב 2 בוויזארד — מחזיר את כל ה-contacts עם הודעות:
-    - contacts עם tag=draft (נוצרו ע"י webhook מהודעות נכנסות)
-    - contact עם tag=חדש (נוצר ע"י PING, ממתין לקישור)
-    המשתמש יבחר מי הלקוח האמיתי ויקשר אותו.
+    שלב 2 בוויזארד — מחזיר contacts עם הודעות נכנסות.
+    שולף ישירות לפי contact_id — ללא תלות בטבלת calls.
     """
     try:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
 
-        # שלוף את כל ה-calls תחת phone זה
-        calls = (
-            db.table("calls")
-            .select("id, phone_id, contact_id, contacts(id, number, name, lid, tag)")
+        # שלוף contacts עם tag=draft/חדש תחת phone זה
+        contacts_res = (
+            db.table("contacts")
+            .select("id, number, name, lid, tag, whatsapp_name")
             .eq("phone_id", phone_id)
-            .order("started_at", desc=True)
-            .limit(50)
+            .in_("tag", ["draft", "חדש"])
             .execute()
         )
 
-        # קבץ לפי contact_id — מניעת כפילות כשיש כמה calls לאותו contact
         contact_map = {}
 
-        for call in calls.data or []:
-            contact = call.get("contacts")
-            if not contact:
-                continue
-
-            # דלג על contacts שכבר קושרו סופית (tag=לקוח)
-            if contact.get("tag") == "לקוח":
-                continue
-
-            # הצג רק contacts שטרם קושרו (draft / חדש)
-            if contact.get("tag") not in ("draft", "חדש", None):
-                continue
-
+        for contact in contacts_res.data or []:
             contact_id = contact["id"]
 
-            # שלוף רק הודעות נכנסות
+            # שלוף הודעות נכנסות ישירות לפי contact_id
             messages = (
                 db.table("messages")
                 .select("*")
-                .eq("call_id", call["id"])
+                .eq("contact_id", contact_id)
                 .eq("direction", True)
                 .gt("sent_at", cutoff)
                 .order("sent_at", desc=False)
@@ -401,50 +367,27 @@ async def get_outgoing_with_replies(
             )
 
             msgs = messages.data or []
-
             if not msgs:
                 continue
 
-            # סעיף 1: הצג שם — אם יש שם אמיתי השתמש בו, אחרת נסה מתוכן ההודעה
-            display_name = contact.get("name") or contact.get("number")
-            if not display_name or display_name == contact.get("number"):
-                first_content = msgs[0].get("content", {})
-                if isinstance(first_content, dict):
-                    wa_name = (
-                        first_content.get("pushName")
-                        or first_content.get("notifyName")
-                        or first_content.get("verifiedBizName")
-                    )
-                    if wa_name:
-                        display_name = wa_name
+            # עדיפות: whatsapp_name > name > number
+            display_name = (
+                contact.get("whatsapp_name") or
+                contact.get("name") or
+                contact.get("number")
+            )
 
-            if contact_id not in contact_map:
-                contact_map[contact_id] = {
-                    "call_id": call["id"],
-                    "contact": {
-                        "id": contact["id"],
-                        "name": display_name,          # סעיף 1: שם ולא מספר
-                        "number": contact["number"],
-                        "lid": contact.get("lid"),
-                        "tag": contact.get("tag"),
-                    },
-                    "messages": msgs,
-                    "last_message": msgs[-1],
-                }
-            else:
-                # contact קיים — מזג את ההודעות
-                existing_msgs = contact_map[contact_id]["messages"]
-                all_msgs = existing_msgs + msgs
-                all_msgs.sort(key=lambda m: m.get("sent_at", ""))
-                seen = set()
-                unique_msgs = []
-                for m in all_msgs:
-                    key = m.get("whatsapp_message_id") or m.get("id")
-                    if key not in seen:
-                        seen.add(key)
-                        unique_msgs.append(m)
-                contact_map[contact_id]["messages"] = unique_msgs
-                contact_map[contact_id]["last_message"] = unique_msgs[-1]
+            contact_map[contact_id] = {
+                "contact": {
+                    "id": contact["id"],
+                    "name": display_name,
+                    "number": contact["number"],
+                    "lid": contact.get("lid"),
+                    "tag": contact.get("tag"),
+                },
+                "messages": msgs,
+                "last_message": msgs[-1],
+            }
 
         conversations = list(contact_map.values())
         return {"conversations": conversations}
@@ -458,7 +401,6 @@ async def get_outgoing_with_replies(
 # PING Flow - Step 3: Select response and link LID
 # ══════════════════════════════════════════════════════════════════════
 
-# בתוך select_response - שלב 3
 @router.post("/contacts/select-response")
 async def select_response(
     body: SelectResponseRequest,
@@ -466,10 +408,9 @@ async def select_response(
     db: Client = Depends(get_supabase),
 ):
     try:
-        # Get the selected message
         message = (
             db.table("messages")
-            .select("sender, leaf_id, call_id, content")  # 🔴 הוסף content
+            .select("sender, leaf_id, call_id, content")
             .eq("id", body.message_id)
             .single()
             .execute()
@@ -481,10 +422,8 @@ async def select_response(
         selected_lid = message.data.get("sender")
         message_content = message.data.get("content", {})
         
-        # ✅ שלוף את השם מWhatsApp (אם קיים)
         whatsapp_name = None
         if isinstance(message_content, dict):
-            # נסה למצוא שם מהמבנה של WhatsApp message
             whatsapp_name = (
                 message_content.get("pushName") or 
                 message_content.get("notifyName") or
@@ -492,19 +431,14 @@ async def select_response(
             )
         
         if not selected_lid:
-            raise HTTPException(
-                status_code=400,
-                detail="Selected message has no LID"
-            )
+            raise HTTPException(status_code=400, detail="Selected message has no LID")
         
-        # ✅ Update contact עם LID + WhatsApp name
         update_data = {
             "lid": selected_lid,
             "tag": "לקוח",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         
-        # רק אם יש whatsapp_name - תעדכן גם אותו
         if whatsapp_name:
             update_data["whatsapp_name"] = whatsapp_name
         
@@ -524,7 +458,6 @@ async def select_response(
             f"WhatsApp Name: {whatsapp_name or 'N/A'}"
         )
         
-        # ✅ Mark ping_sender as completed
         try:
             db.table("ping_sender").update({
                 "status": "completed",
