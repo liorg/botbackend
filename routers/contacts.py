@@ -100,6 +100,27 @@ async def get_call_messages(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/contacts/{contact_id}/messages")
+async def get_contact_messages(
+    contact_id: str,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    """Get all messages for a contact directly by contact_id"""
+    try:
+        messages = (
+            db.table("messages")
+            .select("*")
+            .eq("contact_id", contact_id)
+            .order("sent_at", desc=False)
+            .execute()
+        )
+        return {"messages": messages.data or []}
+    except Exception as e:
+        logger.error(f"Error getting messages for contact {contact_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/contacts")
 async def list_contacts(
     phone_id: str,
