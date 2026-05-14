@@ -81,6 +81,115 @@ def _is_valid_ip(ip: str) -> bool:
 # ══════════════════════════════════════════════════════════════════════
 # CRUD Operations
 # ══════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
+# ADD THIS to routers/contacts.py
+# Place it just before the  @router.post("/contacts/create-from-ping")  route
+# ════════════════════════════════════════════════════════════════════
+
+class CheckPhoneResponse(BaseModel):
+    """
+    status values
+    ─────────────────────────────────────────────────────────────────
+    "new"           – מספר לא קיים כלל ב-contacts → PING חופשי
+    "override"      – קיים ב-contacts ללא LID, ping_sender פעיל   → PING מחדש (OVERRIDE)
+    "blocked"       – קיים ב-contacts עם LID                       → חסום
+    ─────────────────────────────────────────────────────────────────
+    ping_step (רלוונטי רק ב-override):
+      "pending"     – ping_sender קיים עם status=pending (שלב 1 פעיל)
+      "waiting"     – ping_sender קיים עם status=waiting_reply (שלב 2)
+      None          – אין ping_sender פעיל
+    """
+    status: str                        # "new" | "override" | "blocked"
+    contact_id: Optional[str] = None
+    contact_name: Optional[str] = None
+    contact_number: Optional[str] = None
+    ping_step: Optional[str] = None   # "pending" | "waiting_reply" | None
+    ping_sender_id: Optional[str] = None
+
+
+@router.get("/contacts/check-phone", response_model=CheckPhoneResponse)
+async def check_phone(
+    phone_id: str,
+    number: str,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    """
+    onBlur check — בודק אם מספר קיים ובאיזה שלב הוא נמצא.
+    קורא שתי טבלאות: contacts + ping_sender.
+    """
+    clean = "".join(filter(str.isdigit, number))
+    if not clean or len(clean) < 7:
+        return CheckPhoneResponse(status="new")
+
+    logger.info(f"[check-phone] phone_id={phone_id} number={clean}")
+
+    # ── 1. בדוק contacts ──────────────────────────────────────────
+    try:
+        contact_res = (
+            db.table("contacts")
+            .select("id, name, number, lid, whatsapp_name")
+            .eq("phone_id", phone_id)
+            .eq("number", clean)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        logger.error(f"[check-phone] contacts query error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if not contact_res.data:
+        # מספר חדש לחלוטין
+        return CheckPhoneResponse(status="new")
+
+    contact = contact_res.data[0]
+    display_name = (
+        contact.get("whatsapp_name") or
+        contact.get("name") or
+        contact.get("number")
+    )
+
+    # ── 2. יש LID → חסום ─────────────────────────────────────────
+    if contact.get("lid"):
+        return CheckPhoneResponse(
+            status="blocked",
+            contact_id=contact["id"],
+            contact_name=display_name,
+            contact_number=contact["number"],
+        )
+
+    # ── 3. קיים ללא LID → override; בדוק ping_sender ─────────────
+    ping_step = None
+    ping_sender_id = None
+
+    try:
+        ping_res = (
+            db.table("ping_sender")
+            .select("id, status")
+            .eq("contact_id", contact["id"])
+            .in_("status", ["pending", "waiting_reply"])
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        if ping_res.data:
+            row = ping_res.data[0]
+            ping_step      = row["status"]          # "pending" | "waiting_reply"
+            ping_sender_id = row["id"]
+
+    except Exception as e:
+        # ping_sender אינו קריטי — ממשיכים
+        logger.warning(f"[check-phone] ping_sender query failed (non-critical): {e}")
+
+    return CheckPhoneResponse(
+        status="override",
+        contact_id=contact["id"],
+        contact_name=display_name,
+        contact_number=contact["number"],
+        ping_step=ping_step,
+        ping_sender_id=ping_sender_id,
+    )
 @router.get("/calls/{call_id}/messages")
 async def get_call_messages(
     call_id: str,
