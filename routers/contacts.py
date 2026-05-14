@@ -393,12 +393,24 @@ async def create_contact_from_ping(
             response.raise_for_status()
             ping_result = response.json()
 
-        logger.info(f"[PING] Success! pingSenderId: {ping_result.get('pingSenderId')}")
+        ping_sender_id = ping_result.get("pingSenderId")
+        logger.info(f"[PING] Success! pingSenderId: {ping_sender_id}")
+
+        # ── עדכן ping_sender עם contact_id (נוצר ע"י האגנט ללא contact_id) ──
+        if ping_sender_id:
+            try:
+                db.table("ping_sender").update({
+                    "contact_id": contact["id"],
+                    "status":     "pending",
+                }).eq("id", ping_sender_id).execute()
+                logger.info(f"[PING] ping_sender {ping_sender_id} linked to contact {contact['id']}")
+            except Exception as e:
+                logger.warning(f"[PING] Failed to update ping_sender contact_id: {e}")
 
         return {
             "success":             True,
             "contact_id":          contact["id"],
-            "ping_sender_id":      ping_result.get("pingSenderId"),
+            "ping_sender_id":      ping_sender_id,
             "whatsapp_message_id": ping_result.get("messageId"),
             "message":             "PING sent successfully. Waiting for response...",
         }
@@ -543,10 +555,21 @@ async def select_response(
         )
 
         try:
-            db.table("ping_sender").update({
+            # ניסיון 1 — חפש לפי contact_id
+            ps_res = db.table("ping_sender").update({
                 "status":             "completed",
                 "matched_contact_id": body.contact_id,
+                "contact_id":         body.contact_id,
             }).eq("contact_id", body.contact_id).eq("status", "pending").execute()
+
+            # ניסיון 2 — אם contact_id היה null, חפש לפי phone_id + status
+            if not ps_res.data:
+                db.table("ping_sender").update({
+                    "status":             "completed",
+                    "contact_id":         body.contact_id,
+                    "matched_contact_id": body.contact_id,
+                }).eq("phone_id", result.data[0].get("phone_id")).eq("status", "pending").is_("contact_id", "null").execute()
+                logger.info(f"[PING] ping_sender updated via phone_id fallback")
         except Exception as e:
             logger.warning(f"Failed to update ping_sender: {e}")
 
