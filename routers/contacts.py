@@ -29,8 +29,9 @@ class CreateContactFromPingRequest(BaseModel):
 
 
 class SelectResponseRequest(BaseModel):
-    contact_id: str
+    contact_id: str        # ה-draft contact שנבחר (עם LID)
     message_id: str
+    parent_contact_id: Optional[str] = None  # ה-contact הראשי לעדכון (new → active)
 
 
 class UpdateContactRequest(BaseModel):
@@ -441,51 +442,86 @@ async def get_outgoing_with_replies(
     try:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
 
-        contacts_res = (
-            db.table("contacts")
-            .select("id, number, name, lid, tag, whatsapp_name")
+        # לוגיקה:
+        # 1. שלוף ping_senders פעילים → contact_id = ה-contact הראשי (new)
+        # 2. לכל ping_sender, שלוף contacts draft עם LID שה-parent_contact_id שלהם = contact הראשי
+        # 3. שלוף הודעות נכנסות לפי contact_id של ה-draft (כי שם ה-messages משויכות)
+        # 4. החזר את ה-draft contacts (עם LID) לבחירה — הבחירה תעדכן את ה-parent
+
+        ping_senders_res = (
+            db.table("ping_sender")
+            .select("id, contact_id, target_number, status")
             .eq("phone_id", phone_id)
-            .in_("tag", ["draft"])
-            .is_("lid", "null")      # רק draft שטרם קושרו — יש להם ping_sender פעיל
+            .eq("status", "pending")
             .execute()
         )
 
         contact_map = {}
 
-        for contact in contacts_res.data or []:
-            contact_id = contact["id"]
+        for ps in ping_senders_res.data or []:
+            main_contact_id = ps.get("contact_id")
+            target_number   = (ps.get("target_number") or "").replace("+", "").replace(" ", "")
 
-            messages = (
-                db.table("messages")
-                .select("*")
-                .eq("contact_id", contact_id)
-                .eq("direction", True)
-                .gt("sent_at", cutoff)
-                .order("sent_at", desc=False)
+            # שלוף draft contacts עם LID שמצביעים על ה-contact הראשי
+            draft_res = (
+                db.table("contacts")
+                .select("id, number, name, lid, tag, whatsapp_name, parent_contact_id")
+                .eq("phone_id", phone_id)
+                .eq("tag", "draft")
+                .not_.is_("lid", "null")   # רק אלה עם LID — ענו על ה-PING
                 .execute()
             )
 
-            msgs = messages.data or []
-            if not msgs:
-                continue
+            # אם אין parent_contact_id בשדה — נסה להתאים לפי ping_sender.contact_id
+            drafts = [
+                d for d in (draft_res.data or [])
+                if d.get("parent_contact_id") == main_contact_id
+                or (not d.get("parent_contact_id") and main_contact_id)
+            ]
 
-            display_name = (
-                contact.get("whatsapp_name") or
-                contact.get("name") or
-                contact.get("number")
-            )
+            if not drafts and main_contact_id:
+                # fallback: כל draft עם LID תחת phone זה שאין לו parent
+                drafts = [
+                    d for d in (draft_res.data or [])
+                    if not d.get("parent_contact_id")
+                ]
 
-            contact_map[contact_id] = {
-                "contact": {
-                    "id":     contact["id"],
-                    "name":   display_name,
-                    "number": contact["number"],
-                    "lid":    contact.get("lid"),
-                    "tag":    contact.get("tag"),
-                },
-                "messages":     msgs,
-                "last_message": msgs[-1],
-            }
+            for draft in drafts:
+                draft_contact_id = draft["id"]
+
+                # הודעות נכנסות משויכות ל-draft contact
+                messages_res = (
+                    db.table("messages")
+                    .select("*")
+                    .eq("contact_id", draft_contact_id)
+                    .eq("direction", True)
+                    .gt("sent_at", cutoff)
+                    .order("sent_at", desc=False)
+                    .execute()
+                )
+
+                msgs = messages_res.data or []
+                if not msgs:
+                    continue
+
+                display_name = (
+                    draft.get("whatsapp_name") or
+                    draft.get("name") or
+                    draft.get("number")
+                )
+
+                contact_map[draft_contact_id] = {
+                    "contact": {
+                        "id":                draft["id"],
+                        "name":              display_name,
+                        "number":            draft["number"],
+                        "lid":               draft.get("lid"),
+                        "tag":               draft.get("tag"),
+                        "parent_contact_id": main_contact_id,  # ← ה-contact הראשי לעדכון
+                    },
+                    "messages":     msgs,
+                    "last_message": msgs[-1],
+                }
 
         return {"conversations": list(contact_map.values())}
 
@@ -532,17 +568,21 @@ async def select_response(
 
         update_data = {
             "lid":        selected_lid,
-            "tag":        "active",   # ← היה "לקוח"
+            "tag":        "active",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
         if whatsapp_name:
             update_data["whatsapp_name"] = whatsapp_name
 
+        # body.contact_id הוא ה-parent (new) — עדכן אותו עם LID
+        # אם הגיע parent_contact_id בנפרד, השתמש בו
+        target_contact_id = getattr(body, "parent_contact_id", None) or body.contact_id
+
         result = (
             db.table("contacts")
             .update(update_data)
-            .eq("id", body.contact_id)
+            .eq("id", target_contact_id)
             .execute()
         )
 
