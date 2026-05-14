@@ -362,7 +362,7 @@ async def create_contact_from_ping(
                     "number":   clean_number,
                     "name":     body.name or clean_number,
                     "lid":      None,
-                    "tag":      "draft",   # ← היה "חדש"
+                    "tag":      "new",   # contact מקורי — גלוי בטבלה
                 }
                 result = db.table("contacts").insert(contact_data).execute()
                 contact = result.data[0]
@@ -445,7 +445,8 @@ async def get_outgoing_with_replies(
             db.table("contacts")
             .select("id, number, name, lid, tag, whatsapp_name")
             .eq("phone_id", phone_id)
-            .in_("tag", ["draft"])   # ← היה ["draft", "חדש"]
+            .in_("tag", ["draft"])
+            .is_("lid", "null")      # רק draft שטרם קושרו — יש להם ping_sender פעיל
             .execute()
         )
 
