@@ -309,19 +309,16 @@ async def delete_contact(
         msg_count = len(deleted_msgs.data or [])
         logger.info(f"[DELETE] Deleted {msg_count} messages for contact {contact_id}")
 
-        # 2. נתק ping_sender — לא מוחקים, רק מבטלים
-        db.table("ping_sender").update({
-            "status":     "cancelled",
-            "contact_id": None,
-        }).eq("contact_id", contact_id).execute()
-        logger.info(f"[DELETE] Cancelled ping_senders for contact {contact_id}")
+        # 2. מחק ping_sender (תלות ב-contact_id)
+        db.table("ping_sender").delete().eq("contact_id", contact_id).execute()
+        logger.info(f"[DELETE] Deleted ping_senders for contact {contact_id}")
 
-        # 3. contacts ילדים (draft) שמצביעים על הנמחק → is_connect=false
+        # 3. contacts ילדים (draft) — parent_contact_id=NULL (חובה לפני מחיקה) + is_connect=false
         db.table("contacts").update({
-            "is_connect":        False,
             "parent_contact_id": None,
+            "is_connect":        False,
         }).eq("parent_contact_id", contact_id).execute()
-        logger.info(f"[DELETE] Set is_connect=false for children of {contact_id}")
+        logger.info(f"[DELETE] Reset children of {contact_id}: parent=null, is_connect=false")
 
         # 4. מחק את ה-contact
         db.table("contacts").delete().eq("id", contact_id).execute()
