@@ -316,11 +316,12 @@ async def delete_contact(
         }).eq("contact_id", contact_id).execute()
         logger.info(f"[DELETE] Cancelled ping_senders for contact {contact_id}")
 
-        # 3. אפס parent_contact_id של contacts ילדים
+        # 3. contacts ילדים (draft) שמצביעים על הנמחק → is_connect=false
         db.table("contacts").update({
+            "is_connect":        False,
             "parent_contact_id": None,
         }).eq("parent_contact_id", contact_id).execute()
-        logger.info(f"[DELETE] Reset parent_contact_id for children of {contact_id}")
+        logger.info(f"[DELETE] Set is_connect=false for children of {contact_id}")
 
         # 4. מחק את ה-contact
         db.table("contacts").delete().eq("id", contact_id).execute()
@@ -434,22 +435,31 @@ async def create_contact_from_ping(
                 logger.warning(f"[PING] Failed to update ping_sender contact_id: {e}")
 
         # ── אכלס parent_contact_id על draft contacts קיימים ──────────
-        # draft contacts עם LID תקין שאין להם parent עדיין
+        # כל draft עם LID תקין תחת phone זה שאין לו parent עדיין
         try:
             draft_res = (
                 db.table("contacts")
-                .select("id, lid")
+                .select("id, lid, number")
                 .eq("phone_id", body.phone_id)
                 .eq("tag", "draft")
                 .is_("parent_contact_id", "null")
                 .execute()
             )
             for draft in draft_res.data or []:
-                if _is_valid_lid(draft.get("lid")):
+                lid = draft.get("lid") or ""
+                number = draft.get("number") or ""
+                # LID תקין — ה-draft ענה על PING
+                if _is_valid_lid(lid):
                     db.table("contacts").update({
                         "parent_contact_id": contact["id"]
                     }).eq("id", draft["id"]).execute()
-                    logger.info(f"[PING] Linked draft {draft['id']} (lid={draft['lid']}) → parent {contact['id']}")
+                    logger.info(f"[PING] Linked draft {draft['id']} (lid={lid}) → parent {contact['id']}")
+                # fallback: number == clean_number (אותו מספר, draft קיים)
+                elif number == clean_number:
+                    db.table("contacts").update({
+                        "parent_contact_id": contact["id"]
+                    }).eq("id", draft["id"]).execute()
+                    logger.info(f"[PING] Linked draft {draft['id']} (number={number}) → parent {contact['id']}")
         except Exception as e:
             logger.warning(f"[PING] Failed to link existing drafts: {e}")
 
