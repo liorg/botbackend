@@ -456,16 +456,23 @@ async def create_contact_from_ping(
         ping_sender_id = ping_result.get("pingSenderId")
         logger.info(f"[PING] Success! pingSenderId: {ping_sender_id}")
 
-        # עדכן ping_sender עם contact_id
+        # קשר דו-כיווני: ping_sender ↔ contact
         if ping_sender_id:
             try:
+                # ping_sender → contact
                 db.table("ping_sender").update({
                     "contact_id": contact["id"],
                     "status":     "pending",
                 }).eq("id", ping_sender_id).execute()
-                logger.info(f"[PING] ping_sender {ping_sender_id} linked to contact {contact['id']}")
+
+                # contact → ping_sender
+                db.table("contacts").update({
+                    "ping_sender_id": ping_sender_id,
+                }).eq("id", contact["id"]).execute()
+
+                logger.info(f"[PING] Linked: contact {contact['id']} ↔ ping_sender {ping_sender_id}")
             except Exception as e:
-                logger.warning(f"[PING] Failed to update ping_sender contact_id: {e}")
+                logger.warning(f"[PING] Failed to link ping_sender ↔ contact: {e}")
 
         # ── אכלס parent_contact_id על draft contacts קיימים ──────────
         # רק drafts עם LID תקין שאינם ה-contact עצמו
@@ -524,7 +531,10 @@ async def get_outgoing_with_replies(
 ):
     try:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        contact_map = {}
 
+        # ── שלב 1: שלוף ping_senders פעילים עם contact שלהם ──────────
+        # contact.ping_sender_id → ping_sender.id (קשר ישיר)
         ping_senders_res = (
             db.table("ping_sender")
             .select("id, contact_id, target_number, status")
@@ -533,93 +543,90 @@ async def get_outgoing_with_replies(
             .execute()
         )
 
-        contact_map = {}
-
-        # ── שלב א: אסוף את כל ה-main_contact_ids מה-ping_senders ──────
-        main_contact_ids = [
-            ps.get("contact_id")
+        # מפה: ping_sender_id → contact_id של ה-new contact
+        ps_to_main = {
+            ps["id"]: ps["contact_id"]
             for ps in (ping_senders_res.data or [])
             if ps.get("contact_id")
-        ]
+        }
 
-        # ── שלב ב: שלוף את כל ה-drafts עם LID אמיתי תחת phone זה ──
-        # (ללא תלות ב-parent_contact_id — אנחנו נקשר בזמן אמת)
-        all_drafts_res = (
+        # ── שלב 2: שלוף drafts עם LID תקין שטרם קושרו ───────────────
+        drafts_res = (
             db.table("contacts")
-            .select("id, number, name, lid, tag, whatsapp_name, parent_contact_id")
+            .select("id, number, name, lid, tag, whatsapp_name, ping_sender_id, parent_contact_id, is_connect")
             .eq("phone_id", phone_id)
             .eq("tag", "draft")
             .execute()
         )
 
-        # סנן: רק LID אמיתי (לא number כ-fallback, לא is_connect=true שכבר קושר)
         valid_drafts = [
-            d for d in (all_drafts_res.data or [])
+            d for d in (drafts_res.data or [])
             if _is_valid_lid(d.get("lid"))
-            and d.get("lid") != d.get("number")
+            and d.get("is_connect") is not True
         ]
 
-        # ── שלב ג: לכל ping_sender — מצא drafts מתאימים ─────────────
-        for ps in ping_senders_res.data or []:
-            main_contact_id = ps.get("contact_id")
+        # ── שלב 3: לכל draft — מצא את ה-new contact המשייך ──────────
+        for draft in valid_drafts:
+            draft_id = draft["id"]
 
-            # התאמה: parent_contact_id == main_contact_id (מקושר כבר)
-            matched = [d for d in valid_drafts if d.get("parent_contact_id") == main_contact_id]
+            # קשר ישיר: draft.ping_sender_id → ping_sender → new contact
+            main_contact_id = None
+            draft_ps_id = draft.get("ping_sender_id")
 
-            # fallback: draft ללא parent — קשר עכשיו
-            if not matched:
-                unlinked = [d for d in valid_drafts if not d.get("parent_contact_id")]
-                for draft in unlinked:
-                    try:
-                        db.table("contacts").update({
-                            "parent_contact_id": main_contact_id
-                        }).eq("id", draft["id"]).execute()
-                        draft["parent_contact_id"] = main_contact_id
-                        logger.info(f"[STEP2] Auto-linked draft {draft['id']} (lid={draft.get('lid')}) → parent {main_contact_id}")
-                    except Exception as e:
-                        logger.warning(f"[STEP2] Failed to auto-link: {e}")
-                matched = unlinked
-
-            # ── שלב ד: שלוף הודעות נכנסות לכל draft שנמצא ──────────
-            for draft in matched:
-                draft_id = draft["id"]
-                if draft_id in contact_map:
-                    continue  # כבר נוסף
-
-                msgs_res = (
-                    db.table("messages")
-                    .select("*")
-                    .eq("contact_id", draft_id)
-                    .eq("direction", True)
-                    .gt("sent_at", cutoff)
-                    .order("sent_at", desc=False)
-                    .execute()
-                )
-                msgs = msgs_res.data or []
-                if not msgs:
-                    continue
-
-                display_name = (
-                    draft.get("whatsapp_name") or
-                    draft.get("name") or
-                    draft.get("lid") or
-                    draft.get("number")
-                )
-
-                contact_map[draft_id] = {
-                    "contact": {
-                        "id":                draft["id"],
-                        "name":              display_name,
-                        "number":            draft["number"],
-                        "lid":               draft.get("lid"),
-                        "tag":               draft.get("tag"),
+            if draft_ps_id and draft_ps_id in ps_to_main:
+                main_contact_id = ps_to_main[draft_ps_id]
+            elif draft.get("parent_contact_id"):
+                main_contact_id = draft["parent_contact_id"]
+            elif ps_to_main:
+                # fallback: שייך לפי ping_sender הפעיל היחיד
+                first_ps_id     = next(iter(ps_to_main))
+                main_contact_id = ps_to_main[first_ps_id]
+                # שמור את הקשר ל-DB
+                try:
+                    db.table("contacts").update({
+                        "ping_sender_id":    first_ps_id,
                         "parent_contact_id": main_contact_id,
-                    },
-                    "messages":     msgs,
-                    "last_message": msgs[-1],
-                }
+                    }).eq("id", draft_id).execute()
+                    logger.info(f"[STEP2] Auto-linked draft {draft_id} → ping_sender {first_ps_id}")
+                except Exception as e:
+                    logger.warning(f"[STEP2] Failed to auto-link: {e}")
+
+            # ── שלוף הודעות נכנסות ───────────────────────────────────
+            msgs_res = (
+                db.table("messages")
+                .select("*")
+                .eq("contact_id", draft_id)
+                .eq("direction", True)
+                .gt("sent_at", cutoff)
+                .order("sent_at", desc=False)
+                .execute()
+            )
+            msgs = msgs_res.data or []
+            if not msgs:
+                continue
+
+            display_name = (
+                draft.get("whatsapp_name") or
+                draft.get("name") or
+                draft.get("lid") or
+                draft.get("number")
+            )
+
+            contact_map[draft_id] = {
+                "contact": {
+                    "id":                draft_id,
+                    "name":              display_name,
+                    "number":            draft["number"],
+                    "lid":               draft.get("lid"),
+                    "tag":               draft.get("tag"),
+                    "parent_contact_id": main_contact_id,
+                },
+                "messages":     msgs,
+                "last_message": msgs[-1],
+            }
 
         return {"conversations": list(contact_map.values())}
+
 
     except Exception as e:
         logger.error(f"[PING] Error fetching conversations: {e}")
