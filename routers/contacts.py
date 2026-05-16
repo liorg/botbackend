@@ -535,70 +535,78 @@ async def get_outgoing_with_replies(
 
         contact_map = {}
 
+        # ── שלב א: אסוף את כל ה-main_contact_ids מה-ping_senders ──────
+        main_contact_ids = [
+            ps.get("contact_id")
+            for ps in (ping_senders_res.data or [])
+            if ps.get("contact_id")
+        ]
+
+        # ── שלב ב: שלוף את כל ה-drafts עם LID אמיתי תחת phone זה ──
+        # (ללא תלות ב-parent_contact_id — אנחנו נקשר בזמן אמת)
+        all_drafts_res = (
+            db.table("contacts")
+            .select("id, number, name, lid, tag, whatsapp_name, parent_contact_id")
+            .eq("phone_id", phone_id)
+            .eq("tag", "draft")
+            .execute()
+        )
+
+        # סנן: רק LID אמיתי (לא number כ-fallback, לא is_connect=true שכבר קושר)
+        valid_drafts = [
+            d for d in (all_drafts_res.data or [])
+            if _is_valid_lid(d.get("lid"))
+            and d.get("lid") != d.get("number")
+        ]
+
+        # ── שלב ג: לכל ping_sender — מצא drafts מתאימים ─────────────
         for ps in ping_senders_res.data or []:
             main_contact_id = ps.get("contact_id")
-            target_number   = (ps.get("target_number") or "").replace("+", "").replace(" ", "")
 
-            # שלוף drafts עם LID תקין תחת phone זה
-            draft_res = (
-                db.table("contacts")
-                .select("id, number, name, lid, tag, whatsapp_name, parent_contact_id")
-                .eq("phone_id", phone_id)
-                .eq("tag", "draft")
-                .execute()
-            )
+            # התאמה: parent_contact_id == main_contact_id (מקושר כבר)
+            matched = [d for d in valid_drafts if d.get("parent_contact_id") == main_contact_id]
 
-            # סנן drafts עם LID אמיתי בלבד
-            # lid == number = fallback, לא LID אמיתי מ-WhatsApp
-            valid_drafts = [
-                d for d in (draft_res.data or [])
-                if _is_valid_lid(d.get("lid"))
-                and d.get("lid") != d.get("number")   # ← מסנן lid=number fallback
-            ]
-
-            # התאמה: parent_contact_id == main_contact_id
-            # fallback: draft ללא parent (יוקשר אוטומטית)
-            drafts = [
-                d for d in valid_drafts
-                if d.get("parent_contact_id") == main_contact_id
-            ]
-            if not drafts:
-                drafts = [d for d in valid_drafts if not d.get("parent_contact_id")]
-                # אכלס parent_contact_id בזמן אמת
-                for draft in drafts:
+            # fallback: draft ללא parent — קשר עכשיו
+            if not matched:
+                unlinked = [d for d in valid_drafts if not d.get("parent_contact_id")]
+                for draft in unlinked:
                     try:
                         db.table("contacts").update({
                             "parent_contact_id": main_contact_id
                         }).eq("id", draft["id"]).execute()
                         draft["parent_contact_id"] = main_contact_id
-                        logger.info(f"[STEP2] Auto-linked draft {draft['id']} → parent {main_contact_id}")
+                        logger.info(f"[STEP2] Auto-linked draft {draft['id']} (lid={draft.get('lid')}) → parent {main_contact_id}")
                     except Exception as e:
-                        logger.warning(f"[STEP2] Failed to auto-link draft: {e}")
+                        logger.warning(f"[STEP2] Failed to auto-link: {e}")
+                matched = unlinked
 
-            for draft in drafts:
-                draft_contact_id = draft["id"]
+            # ── שלב ד: שלוף הודעות נכנסות לכל draft שנמצא ──────────
+            for draft in matched:
+                draft_id = draft["id"]
+                if draft_id in contact_map:
+                    continue  # כבר נוסף
 
-                messages_res = (
+                msgs_res = (
                     db.table("messages")
                     .select("*")
-                    .eq("contact_id", draft_contact_id)
+                    .eq("contact_id", draft_id)
                     .eq("direction", True)
                     .gt("sent_at", cutoff)
                     .order("sent_at", desc=False)
                     .execute()
                 )
-
-                msgs = messages_res.data or []
+                msgs = msgs_res.data or []
                 if not msgs:
                     continue
 
                 display_name = (
                     draft.get("whatsapp_name") or
                     draft.get("name") or
+                    draft.get("lid") or
                     draft.get("number")
                 )
 
-                contact_map[draft_contact_id] = {
+                contact_map[draft_id] = {
                     "contact": {
                         "id":                draft["id"],
                         "name":              display_name,
