@@ -86,7 +86,9 @@ async def _check_host_health(ip: str, db: Client = None, host_id: str = None) ->
         is_healthy = data.get("status") == "healthy"
         if is_healthy and db and host_id:
             try:
-                db.table("agent_hosts").update({"last_heartbeat": datetime.now(timezone.utc).isoformat()}).eq("id", host_id).execute()
+                db.table("agent_hosts").update({
+                    "last_heartbeat": datetime.now(timezone.utc).isoformat()
+                }).eq("id", host_id).execute()
             except Exception:
                 pass
         return is_healthy
@@ -142,15 +144,53 @@ async def agents_health(user=Depends(get_current_user), db: Client = Depends(get
     for host in hosts:
         ip = host.get("ip_address", "")
         healthy = await _check_host_health(ip, db, host["id"])
-        results.append({"host_id": host["id"], "host_name": host["host_name"], "ip_address": ip, "last_heartbeat": host.get("last_heartbeat"), "healthy": healthy})
-    return {"total": len(results), "healthy": sum(1 for r in results if r["healthy"]), "hosts": results}
+        results.append({
+            "host_id": host["id"],
+            "host_name": host["host_name"],
+            "ip_address": ip,
+            "last_heartbeat": host.get("last_heartbeat"),
+            "healthy": healthy,
+        })
+    return {
+        "total": len(results),
+        "healthy": sum(1 for r in results if r["healthy"]),
+        "hosts": results,
+    }
 
 
 @router.post("/provision")
-async def provision_phone(body: ProvisionRequest, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
+async def provision_phone(
+    body: ProvisionRequest,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    """
+    Provision a phone — upsert לפי number+user_id.
+    אם הטלפון כבר קיים לאותו user → לא יוצר חדש, רק מחזיר/מרענן.
+    Container נוצר רק אם הטלפון חדש לגמרי.
+    """
     clean_number = "".join(filter(str.isdigit, body.phone_number))
-    existing = db.table("phones").select("id, user_id, status, host_id").or_(f"number.eq.{clean_number},number.eq.+{clean_number}").execute()
-    phone = existing.data[0] if existing.data else None
+    if not clean_number or len(clean_number) < 7:
+        raise HTTPException(status_code=400, detail="Invalid phone number")
+
+    # ── בדוק אם קיים לאותו user ──────────────────────────────────────
+    existing_res = (
+        db.table("phones")
+        .select("id, user_id, status, host_id, number")
+        .or_(f"number.eq.{clean_number},number.eq.+{clean_number}")
+        .eq("user_id", user["uid"])   # ← מגביל ל-user הנוכחי בלבד
+        .limit(1)
+        .execute()
+    )
+    phone     = existing_res.data[0] if existing_res.data else None
+    is_new    = phone is None
+
+    logger.info(
+        f"[PROVISION] user={user['uid']} number={clean_number} "
+        f"existing={'yes' if phone else 'no'}"
+    )
+
+    # ── מצא host ──────────────────────────────────────────────────────
     host = None
     if phone:
         host = await _get_host_for_phone(db, phone["id"])
@@ -158,9 +198,40 @@ async def provision_phone(body: ProvisionRequest, user=Depends(get_current_user)
         host = await _find_healthy_host(db)
     if not host:
         raise HTTPException(status_code=503, detail="No agent available")
+
     try:
-        data = await _agent_post(host["ip_address"], "/api/phones/provision", {"phoneNumber": clean_number, "nickname": body.nickname, "tag": body.tag, "userId": user["uid"]})
-        return {"phone_id": data.get("phoneId") or (phone["id"] if phone else None), "phone_number": clean_number, "status": data.get("status", "qr_ready"), "qr_image_base64": data.get("qrImageBase64"), "qr_code": data.get("qrCode"), "qr_refresh_url": data.get("qrRefreshUrl"), "message": data.get("message"), "host_name": host["host_name"]}
+        # ── קרא ל-agent — הוא יעשה upsert פנימי ──────────────────────
+        data = await _agent_post(
+            host["ip_address"],
+            "/api/phones/provision",
+            {
+                "phoneNumber": clean_number,
+                "nickname":    body.nickname,
+                "tag":         body.tag,
+                "userId":      user["uid"],
+                "isNew":       is_new,   # ← Agent יודע אם ליצור container
+            },
+        )
+
+        phone_id = data.get("phoneId") or (phone["id"] if phone else None)
+
+        logger.info(
+            f"[PROVISION] {'Created' if is_new else 'Reused'} phone "
+            f"{clean_number} → id={phone_id}"
+        )
+
+        return {
+            "phone_id":          phone_id,
+            "phone_number":      clean_number,
+            "is_new":            is_new,
+            "status":            data.get("status", "qr_ready"),
+            "qr_image_base64":   data.get("qrImageBase64"),
+            "qr_code":           data.get("qrCode"),
+            "qr_refresh_url":    data.get("qrRefreshUrl"),
+            "message":           data.get("message"),
+            "host_name":         host["host_name"],
+        }
+
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=502, detail=f"Agent error: {e.response.text}")
     except httpx.RequestError as e:
@@ -182,7 +253,12 @@ async def get_qr_code(phone_id: str, user=Depends(get_current_user), db: Client 
         raise HTTPException(status_code=502, detail="Agent error")
     except httpx.RequestError:
         raise HTTPException(status_code=503, detail="Agent unreachable")
-    return {"status": data.get("status"), "qr_image_base64": data.get("qrImageBase64"), "qr_code": data.get("qr"), "message": data.get("message")}
+    return {
+        "status":          data.get("status"),
+        "qr_image_base64": data.get("qrImageBase64"),
+        "qr_code":         data.get("qr"),
+        "message":         data.get("message"),
+    }
 
 
 @router.post("/{phone_id}/pause")
@@ -231,14 +307,12 @@ async def send_text_message(
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
-    """Send a text message via WhatsApp — proxies to .NET agent"""
     host = await _get_host_for_phone(db, phone_id)
     if not host:
         raise HTTPException(status_code=404, detail="Phone host not found")
 
     jid  = body.get("jid")
     text = body.get("text")
-
     if not jid or not text:
         raise HTTPException(status_code=400, detail="jid and text are required")
 
@@ -269,5 +343,8 @@ async def delete_phone(phone_id: str, user=Depends(get_current_user), db: Client
 
 @router.patch("/{phone_id}/docker-status")
 async def update_docker_status(phone_id: str, body: dict, db: Client = Depends(get_supabase)):
-    result = db.table("phones").update({"docker_status": body["status"], "docker_url": body.get("url")}).eq("id", phone_id).execute()
+    result = db.table("phones").update({
+        "docker_status": body["status"],
+        "docker_url":    body.get("url"),
+    }).eq("id", phone_id).execute()
     return result.data[0] if result.data else {}

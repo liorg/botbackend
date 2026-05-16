@@ -129,8 +129,13 @@ async def check_phone(
         contact.get("number")
     )
 
-    # חסום רק אם יש LID אמיתי
-    if _is_valid_lid(contact.get("lid")):
+    # חסום רק אם יש LID אמיתי שאינו המספר עצמו
+    # lid=number הוא fallback — לא חוסם
+    contact_lid = contact.get("lid")
+    contact_number_clean = "".join(filter(str.isdigit, contact.get("number") or ""))
+    lid_is_real = _is_valid_lid(contact_lid) and contact_lid != contact_number_clean
+
+    if lid_is_real:
         return CheckPhoneResponse(
             status="blocked",
             contact_id=contact["id"],
@@ -229,7 +234,24 @@ async def list_contacts(
             .order("created_at", desc=True)
             .execute()
         )
-        return {"contacts": result.data or []}
+        contacts = result.data or []
+
+        # ── הוסף הודעה אחרונה לכל contact ──────────────────────────
+        for contact in contacts:
+            try:
+                msg_res = (
+                    db.table("messages")
+                    .select("id, content, direction, sent_at, sender")
+                    .eq("contact_id", contact["id"])
+                    .order("sent_at", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                contact["last_message"] = msg_res.data[0] if msg_res.data else None
+            except Exception:
+                contact["last_message"] = None
+
+        return {"contacts": contacts}
     except Exception as e:
         logger.error(f"Error listing contacts: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -243,13 +265,14 @@ async def create_contact(
     db: Client = Depends(get_supabase),
 ):
     try:
+        clean_num = body.get("phone", "").replace("+", "").replace(" ", "")
         contact_data = {
             "phone_id": phone_id,
-            "number":   body.get("phone", "").replace("+", ""),
+            "number":   clean_num,
             "name":     body.get("name"),
             "email":    body.get("email"),
             "tag":      body.get("tag", "new"),
-            "lid":      body.get("lid"),
+            "lid":      body.get("lid") or clean_num,  # fallback: lid=number
         }
         result = db.table("contacts").insert(contact_data).execute()
         return result.data[0] if result.data else {}
@@ -304,10 +327,23 @@ async def delete_contact(
         "contact_id": contact_id
     })
     try:
-        # 1. מחק הודעות
+        # 1א. מחק הודעות של ה-contact עצמו
         deleted_msgs = db.table("messages").delete().eq("contact_id", contact_id).execute()
         msg_count = len(deleted_msgs.data or [])
         logger.info(f"[DELETE] Deleted {msg_count} messages for contact {contact_id}")
+
+        # 1ב. מחק הודעות של draft contacts ילדים (הודעות נכנסות מהלקוח)
+        children_res = (
+            db.table("contacts")
+            .select("id")
+            .eq("parent_contact_id", contact_id)
+            .execute()
+        )
+        for child in children_res.data or []:
+            child_msgs = db.table("messages").delete().eq("contact_id", child["id"]).execute()
+            child_count = len(child_msgs.data or [])
+            logger.info(f"[DELETE] Deleted {child_count} messages for child contact {child['id']}")
+            msg_count += child_count
 
         # 2. מחק ping_sender (תלות ב-contact_id)
         db.table("ping_sender").delete().eq("contact_id", contact_id).execute()
@@ -386,7 +422,7 @@ async def create_contact_from_ping(
                     "phone_id": body.phone_id,
                     "number":   clean_number,
                     "name":     body.name or clean_number,
-                    "lid":      None,
+                    "lid":      clean_number,  # fallback: lid=number עד שיתקבל LID אמיתי מ-WhatsApp
                     "tag":      "new",
                 }
                 result = db.table("contacts").insert(contact_data).execute()
