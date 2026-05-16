@@ -468,7 +468,7 @@ async def create_contact_from_ping(
                 logger.warning(f"[PING] Failed to update ping_sender contact_id: {e}")
 
         # ── אכלס parent_contact_id על draft contacts קיימים ──────────
-        # כל draft עם LID תקין תחת phone זה שאין לו parent עדיין
+        # רק drafts עם LID תקין שאינם ה-contact עצמו
         try:
             draft_res = (
                 db.table("contacts")
@@ -476,23 +476,18 @@ async def create_contact_from_ping(
                 .eq("phone_id", body.phone_id)
                 .eq("tag", "draft")
                 .is_("parent_contact_id", "null")
+                .neq("id", contact["id"])          # ← לא יצביע על עצמו
                 .execute()
             )
             for draft in draft_res.data or []:
-                lid = draft.get("lid") or ""
-                number = draft.get("number") or ""
-                # LID תקין — ה-draft ענה על PING
-                if _is_valid_lid(lid):
+                draft_lid    = draft.get("lid") or ""
+                draft_number = draft.get("number") or ""
+                # קשר רק drafts עם LID אמיתי (לא number כ-fallback)
+                if _is_valid_lid(draft_lid) and draft_lid != draft_number:
                     db.table("contacts").update({
                         "parent_contact_id": contact["id"]
                     }).eq("id", draft["id"]).execute()
-                    logger.info(f"[PING] Linked draft {draft['id']} (lid={lid}) → parent {contact['id']}")
-                # fallback: number == clean_number (אותו מספר, draft קיים)
-                elif number == clean_number:
-                    db.table("contacts").update({
-                        "parent_contact_id": contact["id"]
-                    }).eq("id", draft["id"]).execute()
-                    logger.info(f"[PING] Linked draft {draft['id']} (number={number}) → parent {contact['id']}")
+                    logger.info(f"[PING] Linked draft {draft['id']} (lid={draft_lid}) → parent {contact['id']}")
         except Exception as e:
             logger.warning(f"[PING] Failed to link existing drafts: {e}")
 
@@ -553,10 +548,12 @@ async def get_outgoing_with_replies(
                 .execute()
             )
 
-            # סנן drafts עם LID תקין בלבד
+            # סנן drafts עם LID אמיתי בלבד
+            # lid == number = fallback, לא LID אמיתי מ-WhatsApp
             valid_drafts = [
                 d for d in (draft_res.data or [])
                 if _is_valid_lid(d.get("lid"))
+                and d.get("lid") != d.get("number")   # ← מסנן lid=number fallback
             ]
 
             # התאמה: parent_contact_id == main_contact_id
