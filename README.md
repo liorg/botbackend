@@ -43,6 +43,8 @@ python3 -m py_compile main.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/auth.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/phones.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/contacts.py && echo OK || echo FAIL
+python3 -m py_compile ./routers/messages.py && echo OK || echo FAIL
+
 python3 -m py_compile ./dependencies.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/calls.py && echo OK || echo FAIL
 
@@ -50,6 +52,10 @@ python3 -m py_compile ./routers/calls.py && echo OK || echo FAIL
 
 ## LOGGING
 journalctl -u fastapi.service -n 50 --no-pager | grep -i "phones\|list\|uid"
+
+journalctl -u fastapi.service -n 50 --no-pager | grep -A5 "calls/phone"
+
+journalctl -u fastapi.service -n 50 --no-pager | grep -E "(calls|ERROR|error|500|422|phone)"
 
 ## Test Agent Alive
 
