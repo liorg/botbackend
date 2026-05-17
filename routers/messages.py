@@ -44,7 +44,7 @@ def fmt_dt(s):
 
 def format_message(msg, phone_number: str = ""):
     content = parse_content(msg.get("content"))
-    ts = msg.get("sent_at") or msg.get("created_at") or ""
+    ts = msg.get("sent_at") or ""
     sender = msg.get("sender", "")
 
     # קביעת כיוון: אם ה-sender הוא מספר הטלפון של הבוט → יוצא, אחרת נכנס
@@ -76,7 +76,7 @@ async def get_contact_messages(
 ):
     result = (
         db.table("messages")
-        .select("id, contact_id, sender, content, sent_at, created_at")
+        .select("id, contact_id, sender, content, sent_at")
         .eq("contact_id", contact_id)
         .order("sent_at")
         .limit(limit)
