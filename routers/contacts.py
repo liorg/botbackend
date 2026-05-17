@@ -29,9 +29,9 @@ class CreateContactFromPingRequest(BaseModel):
 
 
 class SelectResponseRequest(BaseModel):
-    contact_id: str
+    contact_id: str        # draft contact שנבחר (עם LID)
     message_id: str
-    parent_contact_id: Optional[str] = None
+    parent_contact_id: Optional[str] = None  # new contact לעדכון
 
 
 class UpdateContactRequest(BaseModel):
@@ -57,7 +57,6 @@ class CheckPhoneResponse(BaseModel):
 BOGUS_LID_VALUES = {"status", "broadcast", "0", "", "null", "undefined"}
 
 def _is_valid_lid(lid: Optional[str]) -> bool:
-    """בודק שה-LID הוא ערך אמיתי ולא status/broadcast"""
     return bool(lid and lid.strip() and lid.strip().lower() not in BOGUS_LID_VALUES)
 
 
@@ -72,7 +71,7 @@ async def _get_agent_ip_for_phone(db: Client, phone_id: str) -> Optional[tuple[s
         if not result.data:
             return None
         phone = result.data[0]
-        host = phone.get("agent_hosts")
+        host  = phone.get("agent_hosts")
         if not host:
             return None
         return (host.get("ip_address"), host.get("id"))
@@ -87,6 +86,15 @@ def _is_valid_ip(ip: str) -> bool:
     ip_lower = ip.strip().lower()
     blocked = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
     return ip_lower not in blocked and not ip_lower.startswith("127.")
+
+
+async def _get_user_id_for_phone(db: Client, phone_id: str) -> Optional[str]:
+    """שלוף user_id מה-phone — לאכלס על contacts חדשים"""
+    try:
+        res = db.table("phones").select("user_id").eq("id", phone_id).limit(1).execute()
+        return res.data[0]["user_id"] if res.data else None
+    except Exception:
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -116,7 +124,7 @@ async def check_phone(
             .execute()
         )
     except Exception as e:
-        logger.error(f"[check-phone] contacts query error: {e}")
+        logger.error(f"[check-phone] error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
     if not contact_res.data:
@@ -130,10 +138,9 @@ async def check_phone(
     )
 
     # חסום רק אם יש LID אמיתי שאינו המספר עצמו
-    # lid=number הוא fallback — לא חוסם
-    contact_lid = contact.get("lid")
+    contact_lid          = contact.get("lid")
     contact_number_clean = "".join(filter(str.isdigit, contact.get("number") or ""))
-    lid_is_real = _is_valid_lid(contact_lid) and contact_lid != contact_number_clean
+    lid_is_real          = _is_valid_lid(contact_lid) and contact_lid != contact_number_clean
 
     if lid_is_real:
         return CheckPhoneResponse(
@@ -156,11 +163,10 @@ async def check_phone(
             .execute()
         )
         if ping_res.data:
-            row = ping_res.data[0]
-            ping_step      = row["status"]
-            ping_sender_id = row["id"]
+            ping_step      = ping_res.data[0]["status"]
+            ping_sender_id = ping_res.data[0]["id"]
     except Exception as e:
-        logger.warning(f"[check-phone] ping_sender query failed (non-critical): {e}")
+        logger.warning(f"[check-phone] ping_sender query failed: {e}")
 
     return CheckPhoneResponse(
         status="override",
@@ -221,11 +227,6 @@ async def list_contacts(
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
-    logger.info(f"Listing contacts for phone {phone_id}", extra={
-        "action": "list_contacts",
-        "phone_id": phone_id,
-        "user_id": user.get("uid")
-    })
     try:
         result = (
             db.table("contacts")
@@ -236,7 +237,6 @@ async def list_contacts(
         )
         contacts = result.data or []
 
-        # ── הוסף הודעה אחרונה לכל contact ──────────────────────────
         for contact in contacts:
             try:
                 msg_res = (
@@ -266,13 +266,15 @@ async def create_contact(
 ):
     try:
         clean_num = body.get("phone", "").replace("+", "").replace(" ", "")
+        user_id   = await _get_user_id_for_phone(db, phone_id)
         contact_data = {
             "phone_id": phone_id,
             "number":   clean_num,
             "name":     body.get("name"),
             "email":    body.get("email"),
             "tag":      body.get("tag", "new"),
-            "lid":      body.get("lid") or clean_num,  # fallback: lid=number
+            "lid":      body.get("lid") or clean_num,
+            "user_id":  user_id,
         }
         result = db.table("contacts").insert(contact_data).execute()
         return result.data[0] if result.data else {}
@@ -315,24 +317,12 @@ async def delete_contact(
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
-    """
-    מחיקת contact מלאה:
-    1. מחיקת messages
-    2. ניתוק ping_sender (status=cancelled, contact_id=null)
-    3. איפוס parent_contact_id של contacts שמצביעים עליו
-    4. מחיקת ה-contact עצמו + is_connect=false
-    """
-    logger.info(f"Deleting contact {contact_id}", extra={
-        "action": "delete_contact",
-        "contact_id": contact_id
-    })
     try:
         # 1א. מחק הודעות של ה-contact עצמו
         deleted_msgs = db.table("messages").delete().eq("contact_id", contact_id).execute()
         msg_count = len(deleted_msgs.data or [])
-        logger.info(f"[DELETE] Deleted {msg_count} messages for contact {contact_id}")
 
-        # 1ב. מחק הודעות של draft contacts ילדים (הודעות נכנסות מהלקוח)
+        # 1ב. מחק הודעות של draft contacts ילדים
         children_res = (
             db.table("contacts")
             .select("id")
@@ -341,24 +331,19 @@ async def delete_contact(
         )
         for child in children_res.data or []:
             child_msgs = db.table("messages").delete().eq("contact_id", child["id"]).execute()
-            child_count = len(child_msgs.data or [])
-            logger.info(f"[DELETE] Deleted {child_count} messages for child contact {child['id']}")
-            msg_count += child_count
+            msg_count += len(child_msgs.data or [])
 
-        # 2. מחק ping_sender (תלות ב-contact_id)
+        # 2. מחק ping_sender
         db.table("ping_sender").delete().eq("contact_id", contact_id).execute()
-        logger.info(f"[DELETE] Deleted ping_senders for contact {contact_id}")
 
-        # 3. contacts ילדים (draft) — parent_contact_id=NULL (חובה לפני מחיקה) + is_connect=false
+        # 3. אפס ילדים
         db.table("contacts").update({
             "parent_contact_id": None,
             "is_connect":        False,
         }).eq("parent_contact_id", contact_id).execute()
-        logger.info(f"[DELETE] Reset children of {contact_id}: parent=null, is_connect=false")
 
-        # 4. מחק את ה-contact
+        # 4. מחק contact
         db.table("contacts").delete().eq("id", contact_id).execute()
-        logger.info(f"[DELETE] Contact {contact_id} deleted")
 
         return {"ok": True, "deleted_messages": msg_count}
     except Exception as e:
@@ -367,7 +352,7 @@ async def delete_contact(
 
 
 # ══════════════════════════════════════════════════════════════════════
-# PING Flow - Step 1
+# PING Flow - Step 1: שלח PING
 # ══════════════════════════════════════════════════════════════════════
 
 @router.post("/contacts/create-from-ping")
@@ -376,36 +361,27 @@ async def create_contact_from_ping(
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
-    logger.info(f"[PING] Creating contact from ping: {body.target_number}", extra={
-        "action": "ping_create",
-        "phone_id": body.phone_id,
-        "target": body.target_number
-    })
-
     clean_number = "".join(filter(str.isdigit, body.target_number))
-
     if len(clean_number) < 7 or len(clean_number) > 15:
         raise HTTPException(status_code=400, detail="Invalid phone number length (7-15 digits)")
 
     try:
+        user_id = await _get_user_id_for_phone(db, body.phone_id)
+
+        # ── OVERRIDE: השתמש ב-contact קיים ────────────────────────
         if body.override_contact_id:
-            existing = (
-                db.table("contacts")
-                .select("*")
-                .eq("id", body.override_contact_id)
-                .execute()
-            )
+            existing = db.table("contacts").select("*").eq("id", body.override_contact_id).execute()
             if not existing.data:
                 raise HTTPException(status_code=404, detail="Contact not found for override")
             contact = existing.data[0]
             db.table("contacts").update({
                 "lid":  None,
-                "tag":  "draft",
+                "tag":  "new",
                 "name": body.name or contact.get("name"),
             }).eq("id", body.override_contact_id).execute()
-            contact = {**contact, "lid": None, "tag": "draft"}
-            logger.info(f"[PING] Override contact: {contact['id']}")
+            contact = {**contact, "lid": None, "tag": "new"}
 
+        # ── רגיל: חפש או צור ───────────────────────────────────────
         else:
             existing = (
                 db.table("contacts")
@@ -416,66 +392,53 @@ async def create_contact_from_ping(
             )
             if existing.data:
                 contact = existing.data[0]
-                logger.info(f"[PING] Contact already exists: {contact['id']}")
             else:
-                contact_data = {
+                result = db.table("contacts").insert({
                     "phone_id": body.phone_id,
                     "number":   clean_number,
                     "name":     body.name or clean_number,
-                    "lid":      clean_number,  # fallback: lid=number עד שיתקבל LID אמיתי מ-WhatsApp
+                    "lid":      clean_number,  # fallback עד LID אמיתי
                     "tag":      "new",
-                }
-                result = db.table("contacts").insert(contact_data).execute()
+                    "user_id":  user_id,
+                }).execute()
                 contact = result.data[0]
                 logger.info(f"[PING] Created new contact: {contact['id']}")
 
+        # ── שלח PING לאגנט ─────────────────────────────────────────
         agent_info = await _get_agent_ip_for_phone(db, body.phone_id)
         if not agent_info:
-            raise HTTPException(status_code=404, detail="Agent host not found for this phone.")
+            raise HTTPException(status_code=404, detail="Agent host not found")
 
-        agent_ip, host_id = agent_info
+        agent_ip, _ = agent_info
         if not _is_valid_ip(agent_ip):
             raise HTTPException(status_code=400, detail=f"Invalid agent IP: {agent_ip}")
 
-        jid = f"{clean_number}@s.whatsapp.net"
         agent_url = f"http://{agent_ip}:5000/api/phones/{body.phone_id}/send/ping"
-        logger.info(f"[PING] Sending to {agent_url}")
 
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
                 agent_url,
-                json={"jid": jid, "text": "🔔"},
-                headers={
-                    "X-Agent-Token": AGENT_TOKEN,
-                    "Content-Type": "application/json",
-                },
+                json={"jid": f"{clean_number}@s.whatsapp.net", "text": "🔔"},
+                headers={"X-Agent-Token": AGENT_TOKEN, "Content-Type": "application/json"},
             )
             response.raise_for_status()
             ping_result = response.json()
 
         ping_sender_id = ping_result.get("pingSenderId")
-        logger.info(f"[PING] Success! pingSenderId: {ping_sender_id}")
+        logger.info(f"[PING] pingSenderId={ping_sender_id}")
 
-        # קשר דו-כיווני: ping_sender ↔ contact
+        # ── עדכן ping_sender עם contact_id ─────────────────────────
         if ping_sender_id:
             try:
-                # ping_sender → contact
                 db.table("ping_sender").update({
                     "contact_id": contact["id"],
                     "status":     "pending",
                 }).eq("id", ping_sender_id).execute()
-
-                # contact → ping_sender
-                db.table("contacts").update({
-                    "ping_sender_id": ping_sender_id,
-                }).eq("id", contact["id"]).execute()
-
-                logger.info(f"[PING] Linked: contact {contact['id']} ↔ ping_sender {ping_sender_id}")
+                logger.info(f"[PING] ping_sender {ping_sender_id} → contact {contact['id']}")
             except Exception as e:
-                logger.warning(f"[PING] Failed to link ping_sender ↔ contact: {e}")
+                logger.warning(f"[PING] Failed to link ping_sender: {e}")
 
-        # ── אכלס parent_contact_id על draft contacts קיימים ──────────
-        # רק drafts עם LID תקין שאינם ה-contact עצמו
+        # ── קשר drafts קיימים עם LID אמיתי ל-parent ───────────────
         try:
             draft_res = (
                 db.table("contacts")
@@ -483,20 +446,19 @@ async def create_contact_from_ping(
                 .eq("phone_id", body.phone_id)
                 .eq("tag", "draft")
                 .is_("parent_contact_id", "null")
-                .neq("id", contact["id"])          # ← לא יצביע על עצמו
+                .neq("id", contact["id"])
                 .execute()
             )
             for draft in draft_res.data or []:
                 draft_lid    = draft.get("lid") or ""
                 draft_number = draft.get("number") or ""
-                # קשר רק drafts עם LID אמיתי (לא number כ-fallback)
                 if _is_valid_lid(draft_lid) and draft_lid != draft_number:
                     db.table("contacts").update({
                         "parent_contact_id": contact["id"]
                     }).eq("id", draft["id"]).execute()
-                    logger.info(f"[PING] Linked draft {draft['id']} (lid={draft_lid}) → parent {contact['id']}")
+                    logger.info(f"[PING] Linked draft {draft['id']} → parent {contact['id']}")
         except Exception as e:
-            logger.warning(f"[PING] Failed to link existing drafts: {e}")
+            logger.warning(f"[PING] Failed to link drafts: {e}")
 
         return {
             "success":             True,
@@ -507,10 +469,8 @@ async def create_contact_from_ping(
         }
 
     except httpx.HTTPStatusError as e:
-        logger.error(f"[PING] Agent HTTP error: {e.response.status_code} - {e.response.text}")
-        raise HTTPException(status_code=502, detail=f"Agent returned error: {e.response.text}")
-    except httpx.RequestError as e:
-        logger.error(f"[PING] Agent unreachable: {e}")
+        raise HTTPException(status_code=502, detail=f"Agent error: {e.response.text}")
+    except httpx.RequestError:
         raise HTTPException(status_code=503, detail=f"Cannot reach agent at {agent_ip}.")
     except HTTPException:
         raise
@@ -520,7 +480,7 @@ async def create_contact_from_ping(
 
 
 # ══════════════════════════════════════════════════════════════════════
-# PING Flow - Step 2
+# PING Flow - Step 2: שלוף שיחות ממתינות
 # ══════════════════════════════════════════════════════════════════════
 
 @router.get("/contacts/outgoing-with-replies/{phone_id}")
@@ -533,27 +493,23 @@ async def get_outgoing_with_replies(
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         contact_map = {}
 
-        # ── שלב 1: שלוף ping_senders פעילים עם contact שלהם ──────────
-        # contact.ping_sender_id → ping_sender.id (קשר ישיר)
-        ping_senders_res = (
+        # ── שלוף ping_sender פעיל — main_contact_id לשלב 3 ──────────
+        ps_res = (
             db.table("ping_sender")
             .select("id, contact_id, target_number, status")
             .eq("phone_id", phone_id)
             .eq("status", "pending")
+            .order("created_at", desc=True)
+            .limit(1)
             .execute()
         )
+        active_ps       = ps_res.data[0] if ps_res.data else None
+        main_contact_id = active_ps.get("contact_id") if active_ps else None
 
-        # מפה: ping_sender_id → contact_id של ה-new contact
-        ps_to_main = {
-            ps["id"]: ps["contact_id"]
-            for ps in (ping_senders_res.data or [])
-            if ps.get("contact_id")
-        }
-
-        # ── שלב 2: שלוף drafts עם LID תקין שטרם קושרו ───────────────
+        # ── שלוף drafts עם LID תקין שטרם קושרו ──────────────────────
         drafts_res = (
             db.table("contacts")
-            .select("id, number, name, lid, tag, whatsapp_name, ping_sender_id, parent_contact_id, is_connect")
+            .select("id, number, name, lid, tag, whatsapp_name, parent_contact_id, is_connect")
             .eq("phone_id", phone_id)
             .eq("tag", "draft")
             .execute()
@@ -565,33 +521,10 @@ async def get_outgoing_with_replies(
             and d.get("is_connect") is not True
         ]
 
-        # ── שלב 3: לכל draft — מצא את ה-new contact המשייך ──────────
+        # ── לכל draft — שלוף הודעות נכנסות ──────────────────────────
         for draft in valid_drafts:
             draft_id = draft["id"]
 
-            # קשר ישיר: draft.ping_sender_id → ping_sender → new contact
-            main_contact_id = None
-            draft_ps_id = draft.get("ping_sender_id")
-
-            if draft_ps_id and draft_ps_id in ps_to_main:
-                main_contact_id = ps_to_main[draft_ps_id]
-            elif draft.get("parent_contact_id"):
-                main_contact_id = draft["parent_contact_id"]
-            elif ps_to_main:
-                # fallback: שייך לפי ping_sender הפעיל היחיד
-                first_ps_id     = next(iter(ps_to_main))
-                main_contact_id = ps_to_main[first_ps_id]
-                # שמור את הקשר ל-DB
-                try:
-                    db.table("contacts").update({
-                        "ping_sender_id":    first_ps_id,
-                        "parent_contact_id": main_contact_id,
-                    }).eq("id", draft_id).execute()
-                    logger.info(f"[STEP2] Auto-linked draft {draft_id} → ping_sender {first_ps_id}")
-                except Exception as e:
-                    logger.warning(f"[STEP2] Failed to auto-link: {e}")
-
-            # ── שלוף הודעות נכנסות ───────────────────────────────────
             msgs_res = (
                 db.table("messages")
                 .select("*")
@@ -612,6 +545,9 @@ async def get_outgoing_with_replies(
                 draft.get("number")
             )
 
+            # parent_contact_id — מה-draft עצמו או מה-ping_sender הפעיל
+            parent = draft.get("parent_contact_id") or main_contact_id
+
             contact_map[draft_id] = {
                 "contact": {
                     "id":                draft_id,
@@ -619,7 +555,7 @@ async def get_outgoing_with_replies(
                     "number":            draft["number"],
                     "lid":               draft.get("lid"),
                     "tag":               draft.get("tag"),
-                    "parent_contact_id": main_contact_id,
+                    "parent_contact_id": parent,
                 },
                 "messages":     msgs,
                 "last_message": msgs[-1],
@@ -627,14 +563,13 @@ async def get_outgoing_with_replies(
 
         return {"conversations": list(contact_map.values())}
 
-
     except Exception as e:
         logger.error(f"[PING] Error fetching conversations: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 # ══════════════════════════════════════════════════════════════════════
-# PING Flow - Step 3
+# PING Flow - Step 3: בחירת תגובה וקישור LID
 # ══════════════════════════════════════════════════════════════════════
 
 @router.post("/contacts/select-response")
@@ -646,17 +581,19 @@ async def select_response(
     try:
         message = (
             db.table("messages")
-            .select("sender, leaf_id, call_id, content")
+            .select("sender, content")
             .eq("id", body.message_id)
             .single()
             .execute()
         )
-
         if not message.data:
             raise HTTPException(status_code=404, detail="Message not found")
 
         selected_lid    = message.data.get("sender")
         message_content = message.data.get("content", {})
+
+        if not selected_lid or not _is_valid_lid(selected_lid):
+            raise HTTPException(status_code=400, detail=f"Invalid LID: {selected_lid}")
 
         whatsapp_name = None
         if isinstance(message_content, dict):
@@ -666,12 +603,8 @@ async def select_response(
                 message_content.get("verifiedBizName")
             )
 
-        if not selected_lid:
-            raise HTTPException(status_code=400, detail="Selected message has no LID")
-
-        # ודא שה-LID תקין לפני שמירה
-        if not _is_valid_lid(selected_lid):
-            raise HTTPException(status_code=400, detail=f"Invalid LID value: {selected_lid}")
+        # ── עדכן ה-new contact → active ────────────────────────────
+        target_contact_id = body.parent_contact_id or body.contact_id
 
         update_data = {
             "lid":        selected_lid,
@@ -681,44 +614,36 @@ async def select_response(
         if whatsapp_name:
             update_data["whatsapp_name"] = whatsapp_name
 
-        # עדכן את ה-parent contact (new → active)
-        target_contact_id = body.parent_contact_id or body.contact_id
-
         result = (
             db.table("contacts")
             .update(update_data)
             .eq("id", target_contact_id)
             .execute()
         )
-
         if not result.data:
             raise HTTPException(status_code=404, detail="Contact not found")
 
-        logger.info(
-            f"[PING] Contact {target_contact_id} linked - "
-            f"LID: {selected_lid[:30]}... | "
-            f"WhatsApp Name: {whatsapp_name or 'N/A'}"
-        )
+        logger.info(f"[PONG] Contact {target_contact_id} → active | LID={selected_lid}")
 
-        # עדכן ping_sender → completed
+        # ── עדכן ping_sender → completed ───────────────────────────
+        # contact_id נשמר כפי שהוא (new contact) — לא מחליפים!
         try:
-            ps_res = db.table("ping_sender").update({
-                "status":             "completed",
-                "matched_contact_id": target_contact_id,
-                "contact_id":         target_contact_id,
-            }).eq("contact_id", target_contact_id).eq("status", "pending").execute()
-
+            ps_res = (
+                db.table("ping_sender")
+                .update({"status": "completed"})
+                .eq("contact_id", target_contact_id)
+                .eq("status", "pending")
+                .execute()
+            )
             if not ps_res.data:
-                # fallback: חפש לפי phone_id + pending + null contact_id
+                # fallback: לפי phone_id
                 phone_id = result.data[0].get("phone_id")
                 db.table("ping_sender").update({
-                    "status":             "completed",
-                    "contact_id":         target_contact_id,
-                    "matched_contact_id": target_contact_id,
-                }).eq("phone_id", phone_id).eq("status", "pending").is_("contact_id", "null").execute()
-                logger.info(f"[PING] ping_sender updated via phone_id fallback")
+                    "status": "completed"
+                }).eq("phone_id", phone_id).eq("status", "pending").execute()
+                logger.info(f"[PONG] ping_sender completed via phone_id fallback")
         except Exception as e:
-            logger.warning(f"Failed to update ping_sender: {e}")
+            logger.warning(f"[PONG] Failed to update ping_sender: {e}")
 
         return {
             "success": True,
@@ -729,12 +654,12 @@ async def select_response(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[PING] Error selecting response: {e}")
+        logger.error(f"[PONG] Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Agent Webhook — קישור draft לparent בזמן אמת
+# Agent Webhook — קישור draft לparent
 # ══════════════════════════════════════════════════════════════════════
 
 class LinkDraftRequest(BaseModel):
@@ -761,7 +686,6 @@ async def link_draft_to_parent(
             .limit(1)
             .execute()
         )
-
         if not ps_res.data:
             return {"ok": False, "reason": "no active ping_sender"}
 
@@ -773,7 +697,6 @@ async def link_draft_to_parent(
             "parent_contact_id": parent_contact_id
         }).eq("id", body.draft_contact_id).execute()
 
-        logger.info(f"[link-draft] Draft {body.draft_contact_id} → parent {parent_contact_id}")
         return {"ok": True, "parent_contact_id": parent_contact_id}
 
     except Exception as e:
