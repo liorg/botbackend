@@ -318,31 +318,20 @@ async def delete_contact(
     db: Client = Depends(get_supabase),
 ):
     try:
-        # 1א. מחק הודעות של ה-contact עצמו
+        # 1. מחק הודעות של ה-contact עצמו
         deleted_msgs = db.table("messages").delete().eq("contact_id", contact_id).execute()
         msg_count = len(deleted_msgs.data or [])
 
-        # 1ב. מחק הודעות של draft contacts ילדים
-        children_res = (
-            db.table("contacts")
-            .select("id")
-            .eq("parent_contact_id", contact_id)
-            .execute()
-        )
-        for child in children_res.data or []:
-            child_msgs = db.table("messages").delete().eq("contact_id", child["id"]).execute()
-            msg_count += len(child_msgs.data or [])
-
-        # 2. מחק ping_sender
+        # 2. מחק ping_senders המקושרים
         db.table("ping_sender").delete().eq("contact_id", contact_id).execute()
 
-        # 3. אפס ילדים
+        # 3. אפס parent_contact_id על drafts ילדים (לא מוחקים אותם)
         db.table("contacts").update({
             "parent_contact_id": None,
             "is_connect":        False,
         }).eq("parent_contact_id", contact_id).execute()
 
-        # 4. מחק contact
+        # 4. מחק את ה-contact עצמו
         db.table("contacts").delete().eq("id", contact_id).execute()
 
         return {"ok": True, "deleted_messages": msg_count}
