@@ -631,11 +631,19 @@ async def select_response(
         draft_contact_id = body.contact_id
         if draft_contact_id != target_contact_id:
             try:
+                # שלוף whatsapp_name מה-draft לפני הניקוי
+                draft_res = db.table("contacts").select("whatsapp_name").eq("id", draft_contact_id).limit(1).execute()
+                draft_whatsapp_name = draft_res.data[0].get("whatsapp_name") if draft_res.data else None
+
                 db.table("contacts").update({
-                    "lid": None,
+                    "lid":        None,
                     "is_connect": True,
                 }).eq("id", draft_contact_id).execute()
                 logger.info(f"[PONG] Cleared LID from draft {draft_contact_id}")
+
+                # העבר whatsapp_name לnew contact אם חסר
+                if draft_whatsapp_name and not whatsapp_name:
+                    whatsapp_name = draft_whatsapp_name
             except Exception as e:
                 logger.warning(f"[PONG] Failed to clear draft LID: {e}")
 
