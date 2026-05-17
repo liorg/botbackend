@@ -237,9 +237,13 @@ async def list_contacts(
         )
         contacts = result.data or []
 
+        # בנה מפה של contact_id → draft children (לחיפוש הודעות נכנסות)
+        all_ids = [c["id"] for c in contacts]
+
         for contact in contacts:
             try:
-                msg_res = (
+                # שלוף הודעות של ה-contact עצמו
+                own_msgs = (
                     db.table("messages")
                     .select("id, content, direction, sent_at, sender")
                     .eq("contact_id", contact["id"])
@@ -247,7 +251,34 @@ async def list_contacts(
                     .limit(1)
                     .execute()
                 )
-                contact["last_message"] = msg_res.data[0] if msg_res.data else None
+                last = own_msgs.data[0] if own_msgs.data else None
+
+                # אם active — חפש הודעות של draft שמתאים לפי LID או parent_contact_id
+                if contact.get("tag") == "active" and contact.get("lid"):
+                    # מצא draft לפי LID (number=LID לפני שנוקה) או parent_contact_id
+                    contact_lid = contact.get("lid")
+                    draft_ids = [
+                        c["id"] for c in contacts
+                        if c.get("tag") == "draft" and (
+                            c.get("parent_contact_id") == contact["id"] or
+                            c.get("number") == contact_lid
+                        )
+                    ]
+                    if draft_ids:
+                        draft_msgs = (
+                            db.table("messages")
+                            .select("id, content, direction, sent_at, sender")
+                            .eq("direction", True)
+                            .in_("contact_id", draft_ids)
+                            .order("sent_at", desc=True)
+                            .limit(1)
+                            .execute()
+                        )
+                        draft_last = draft_msgs.data[0] if draft_msgs.data else None
+                        if draft_last and (not last or draft_last["sent_at"] > last["sent_at"]):
+                            last = draft_last
+
+                contact["last_message"] = last
             except Exception:
                 contact["last_message"] = None
 
