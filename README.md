@@ -44,6 +44,7 @@ python3 -m py_compile ./routers/auth.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/phones.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/contacts.py && echo OK || echo FAIL
 python3 -m py_compile ./dependencies.py && echo OK || echo FAIL
+python3 -m py_compile ./routers/calls.py && echo OK || echo FAIL
 
 
 
