@@ -637,6 +637,19 @@ async def select_response(
         # ── עדכן ה-new contact → active ────────────────────────────
         target_contact_id = body.parent_contact_id or body.contact_id
 
+        # נקה LID מה-draft contact לפני שמעדכנים את ה-new
+        # כדי למנוע unique constraint violation על (lid, phone_id)
+        draft_contact_id = body.contact_id
+        if draft_contact_id != target_contact_id:
+            try:
+                db.table("contacts").update({
+                    "lid": None,
+                    "is_connect": True,
+                }).eq("id", draft_contact_id).execute()
+                logger.info(f"[PONG] Cleared LID from draft {draft_contact_id}")
+            except Exception as e:
+                logger.warning(f"[PONG] Failed to clear draft LID: {e}")
+
         update_data = {
             "lid":        selected_lid,
             "tag":        "active",
