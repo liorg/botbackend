@@ -392,19 +392,49 @@ async def create_contact_from_ping(
             )
             if existing.data:
                 contact = existing.data[0]
+                # אם נוצר ע"י WEBHOOK כ-draft — שדרג ל-new
+                if contact.get("tag") == "draft":
+                    db.table("contacts").update({
+                        "tag":  "new",
+                        "name": body.name or contact.get("name") or clean_number,
+                    }).eq("id", contact["id"]).execute()
+                    contact = {**contact, "tag": "new"}
+                    logger.info(f"[PING] Upgraded draft → new: {contact['id']}")
+                else:
+                    logger.info(f"[PING] Contact already exists: {contact['id']}")
             else:
-                result = db.table("contacts").insert({
-                    "phone_id": body.phone_id,
-                    "number":   clean_number,
-                    "name":     body.name or clean_number,
-                    "lid":      clean_number,  # fallback עד LID אמיתי
-                    "tag":      "new",
-                    "user_id":  user_id,
-                }).execute()
-                contact = result.data[0]
-                logger.info(f"[PING] Created new contact: {contact['id']}")
+                try:
+                    result = db.table("contacts").insert({
+                        "phone_id": body.phone_id,
+                        "number":   clean_number,
+                        "name":     body.name or clean_number,
+                        "lid":      clean_number,  # fallback עד LID אמיתי
+                        "tag":      "new",
+                        "user_id":  user_id,
+                    }).execute()
+                    contact = result.data[0]
+                    logger.info(f"[PING] Created new contact: {contact['id']}")
+                except Exception as insert_err:
+                    if "23505" in str(insert_err) or "duplicate key" in str(insert_err):
+                        # כבר קיים עם lid=number — שלוף אותו
+                        existing2 = (
+                            db.table("contacts")
+                            .select("*")
+                            .eq("phone_id", body.phone_id)
+                            .eq("lid", clean_number)
+                            .limit(1)
+                            .execute()
+                        )
+                        if existing2.data:
+                            contact = existing2.data[0]
+                            logger.info(f"[PING] Found existing by lid fallback: {contact['id']}")
+                        else:
+                            raise
+                    else:
+                        raise
 
         # ── שלח PING לאגנט ─────────────────────────────────────────
+        # ה-Agent יוצר את ping_sender בצד שלו ומחזיר pingSenderId
         agent_info = await _get_agent_ip_for_phone(db, body.phone_id)
         if not agent_info:
             raise HTTPException(status_code=404, detail="Agent host not found")
@@ -424,19 +454,19 @@ async def create_contact_from_ping(
             response.raise_for_status()
             ping_result = response.json()
 
-        ping_sender_id = ping_result.get("pingSenderId")
-        logger.info(f"[PING] pingSenderId={ping_sender_id}")
+        ping_sender_id      = ping_result.get("pingSenderId")
+        whatsapp_message_id = ping_result.get("messageId")
+        logger.info(f"[PING] pingSenderId={ping_sender_id} messageId={whatsapp_message_id}")
 
-        # ── עדכן ping_sender עם contact_id ─────────────────────────
+        # ── עדכן ping_sender.contact_id — נוצר ע"י ה-Agent ──────────
         if ping_sender_id:
             try:
                 db.table("ping_sender").update({
                     "contact_id": contact["id"],
-                    "status":     "pending",
                 }).eq("id", ping_sender_id).execute()
                 logger.info(f"[PING] ping_sender {ping_sender_id} → contact {contact['id']}")
             except Exception as e:
-                logger.warning(f"[PING] Failed to link ping_sender: {e}")
+                logger.warning(f"[PING] Failed to update contact_id: {e}")
 
         # ── קשר drafts קיימים עם LID אמיתי ל-parent ───────────────
         try:
@@ -464,7 +494,7 @@ async def create_contact_from_ping(
             "success":             True,
             "contact_id":          contact["id"],
             "ping_sender_id":      ping_sender_id,
-            "whatsapp_message_id": ping_result.get("messageId"),
+            "whatsapp_message_id": whatsapp_message_id,
             "message":             "PING sent successfully. Waiting for response...",
         }
 
