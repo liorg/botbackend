@@ -268,8 +268,7 @@ async def list_contacts(
                         draft_msgs = (
                             db.table("messages")
                             .select("id, content, direction, sent_at, sender")
-                            .eq("direction", True)
-                            .in_("contact_id", draft_ids)
+                            .in_("contact_id", draft_ids)  # כל הכיוונים
                             .order("sent_at", desc=True)
                             .limit(1)
                             .execute()
