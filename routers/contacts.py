@@ -515,10 +515,11 @@ async def get_outgoing_with_replies(
             .execute()
         )
 
+        # סנן: draft עם LID תקין שעדיין לא קושר לcontact ראשי
+        # is_connect לא משמש כפילטר — יכול להיות true מ-flows ישנים
         valid_drafts = [
             d for d in (drafts_res.data or [])
             if _is_valid_lid(d.get("lid"))
-            and d.get("is_connect") is not True
         ]
 
         # ── לכל draft — שלוף הודעות נכנסות ──────────────────────────
