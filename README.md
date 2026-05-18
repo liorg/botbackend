@@ -15,6 +15,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 # פיתוח עם reload:
 uvicorn main:app --reload --port 8000
 ```
+sudo systemctl restart fastapi.service
 
 ## מבנה
 
@@ -50,19 +51,20 @@ python3 -m py_compile ./routers/calls.py && echo OK || echo FAIL
 
 
 
-## LOGGING
+# LOGGING
+
 journalctl -u fastapi.service -n 50 --no-pager | grep -i "phones\|list\|uid"
 
 journalctl -u fastapi.service -n 50 --no-pager | grep -A5 "calls/phone"
 
 journalctl -u fastapi.service -n 50 --no-pager | grep -E "(calls|ERROR|error|500|422|phone)"
 
-## Test Agent Alive
+# Test Agent Alive
 
 sudo systemctl status whatsapp-manager
 sudo journalctl -u whatsapp-manager -n 50
 
-## Git
+# Git
 git add .
-git commit --m 'version 1.51'
+git commit --m 'version 1.52'
 git push
