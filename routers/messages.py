@@ -54,6 +54,8 @@ def format_message(msg, phone_number: str = ""):
         msg_type = "file"
     elif raw_type in ("buttons", "button"):
         msg_type = "buttons"
+    elif raw_type in ("button_reply", "buttonsResponseMessage"):
+        msg_type = "button_reply"
     else:
         msg_type = "text"
 
