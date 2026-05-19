@@ -127,3 +127,72 @@ async def get_contact_messages(
     )
     msgs = result.data or []
     return [format_message(m, phone_number) for m in msgs]
+@router.get("/phone/{phone_id}/contact/{contact_id}")
+async def get_messages_by_phone_and_contact(
+    phone_id: str,
+    contact_id: str,
+    limit: int = Query(200, le=500),
+    db: Client = Depends(get_supabase),
+):
+    # שליפת מספר הבוט לזיהוי כיוון
+    phone_res = (
+        db.table("phones")
+        .select("number")
+        .eq("id", phone_id)
+        .limit(1)
+        .execute()
+    )
+    phone_number = (phone_res.data or [{}])[0].get("number", "")
+
+    # ניסיון ראשון — עם phone_id
+    result = (
+        db.table("messages")
+        .select("id, contact_id, phone_id, sender, content, sent_at, direction")
+        .eq("phone_id", phone_id)
+        .eq("contact_id", contact_id)
+        .order("sent_at")
+        .limit(limit)
+        .execute()
+    )
+    msgs = result.data or []
+
+    # fallback — הודעות ישנות ללא phone_id
+    if not msgs:
+        fallback = (
+            db.table("messages")
+            .select("id, contact_id, phone_id, sender, content, sent_at, direction")
+            .eq("contact_id", contact_id)
+            .is_("phone_id", "null")
+            .order("sent_at")
+            .limit(limit)
+            .execute()
+        )
+        msgs = fallback.data or []
+
+    return [format_message(m, phone_number) for m in msgs]
+
+
+@router.get("/phone/{phone_id}")
+async def get_all_phone_messages(
+    phone_id: str,
+    limit: int = Query(500, le=1000),
+    db: Client = Depends(get_supabase),
+):
+    phone_res = (
+        db.table("phones")
+        .select("number")
+        .eq("id", phone_id)
+        .limit(1)
+        .execute()
+    )
+    phone_number = (phone_res.data or [{}])[0].get("number", "")
+
+    result = (
+        db.table("messages")
+        .select("id, contact_id, phone_id, sender, content, sent_at, direction")
+        .eq("phone_id", phone_id)
+        .order("sent_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return [format_message(m, phone_number) for m in (result.data or [])]
