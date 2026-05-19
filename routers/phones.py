@@ -70,7 +70,6 @@ async def _get_active_hosts(db: Client) -> list[dict]:
         db.table("agent_hosts")
         .select("id, host_name, ip_address, external_ip, max_containers, last_heartbeat")
         .eq("status", "active")
-        .gt("last_heartbeat", cutoff)
         .execute()
     )
     all_hosts = result.data or []
