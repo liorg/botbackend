@@ -4,6 +4,7 @@ Proxy between UI and .NET Agent (WhatsAppDockerManager)
 """
 
 import os
+import asyncio
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -51,6 +52,24 @@ async def _agent_post(ip: str, path: str, body: dict) -> dict:
         return resp.json()
 
 
+async def _agent_post_with_retry(
+    ip: str, path: str, body: dict,
+    retries: int = 3, delay: float = 2.0
+) -> dict:
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            return await _agent_post(ip, path, body)
+        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            last_error = e
+            logger.warning(
+                f"[AGENT] Attempt {attempt}/{retries} failed for {ip}{path}: {e}"
+            )
+            if attempt < retries:
+                await asyncio.sleep(delay * attempt)  # 2s, 4s, 6s
+    raise last_error
+
+
 def _is_valid_agent_ip(ip: str) -> bool:
     if not ip:
         return False
@@ -65,7 +84,6 @@ def _is_valid_agent_ip(ip: str) -> bool:
 
 
 async def _get_active_hosts(db: Client) -> list[dict]:
-    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=HOST_HEARTBEAT_TIMEOUT_MINUTES)).isoformat()
     result = (
         db.table("agent_hosts")
         .select("id, host_name, ip_address, external_ip, max_containers, last_heartbeat")
@@ -96,16 +114,25 @@ async def _check_host_health(ip: str, db: Client = None, host_id: str = None) ->
         return False
 
 
-async def _find_healthy_host(db: Client) -> Optional[dict]:
-    hosts = await _get_active_hosts(db)
-    if not hosts:
-        logger.error("No production agent hosts found")
-        return None
-    for host in hosts:
-        ip = host.get("ip_address", "")
-        if await _check_host_health(ip, db, host["id"]):
-            return host
-        logger.warning(f"Host {host['host_name']} ({ip}) failed health check")
+async def _find_healthy_host(db: Client, retries: int = 3) -> Optional[dict]:
+    for attempt in range(1, retries + 1):
+        hosts = await _get_active_hosts(db)
+        if not hosts:
+            logger.error("No production agent hosts found")
+            return None
+
+        for host in hosts:
+            ip = host.get("ip_address", "")
+            if await _check_host_health(ip, db, host["id"]):
+                logger.info(f"[AGENT] Found healthy host {host['host_name']} ({ip})")
+                return host
+            logger.warning(f"[AGENT] Host {host['host_name']} ({ip}) failed health check")
+
+        if attempt < retries:
+            logger.warning(f"[AGENT] No healthy host — retry {attempt}/{retries} in 3s")
+            await asyncio.sleep(3)
+
+    logger.error("[AGENT] All hosts failed health check after retries")
     return None
 
 
@@ -144,16 +171,16 @@ async def agents_health(user=Depends(get_current_user), db: Client = Depends(get
         ip = host.get("ip_address", "")
         healthy = await _check_host_health(ip, db, host["id"])
         results.append({
-            "host_id": host["id"],
-            "host_name": host["host_name"],
-            "ip_address": ip,
+            "host_id":        host["id"],
+            "host_name":      host["host_name"],
+            "ip_address":     ip,
             "last_heartbeat": host.get("last_heartbeat"),
-            "healthy": healthy,
+            "healthy":        healthy,
         })
     return {
-        "total": len(results),
+        "total":   len(results),
         "healthy": sum(1 for r in results if r["healthy"]),
-        "hosts": results,
+        "hosts":   results,
     }
 
 
@@ -163,11 +190,6 @@ async def provision_phone(
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
-    """
-    Provision a phone — upsert לפי number+user_id.
-    אם הטלפון כבר קיים לאותו user → לא יוצר חדש, רק מחזיר/מרענן.
-    Container נוצר רק אם הטלפון חדש לגמרי.
-    """
     clean_number = "".join(filter(str.isdigit, body.phone_number))
     if not clean_number or len(clean_number) < 7:
         raise HTTPException(status_code=400, detail="Invalid phone number")
@@ -177,12 +199,12 @@ async def provision_phone(
         db.table("phones")
         .select("id, user_id, status, host_id, number")
         .or_(f"number.eq.{clean_number},number.eq.+{clean_number}")
-        .eq("user_id", user["uid"])   # ← מגביל ל-user הנוכחי בלבד
+        .eq("user_id", user["uid"])
         .limit(1)
         .execute()
     )
-    phone     = existing_res.data[0] if existing_res.data else None
-    is_new    = phone is None
+    phone  = existing_res.data[0] if existing_res.data else None
+    is_new = phone is None
 
     logger.info(
         f"[PROVISION] user={user['uid']} number={clean_number} "
@@ -194,13 +216,12 @@ async def provision_phone(
     if phone:
         host = await _get_host_for_phone(db, phone["id"])
     if not host:
-        host = await _find_healthy_host(db)
+        host = await _find_healthy_host(db, retries=3)
     if not host:
-        raise HTTPException(status_code=503, detail="No agent available")
+        raise HTTPException(status_code=503, detail="No agent available — all hosts unreachable")
 
     try:
-        # ── קרא ל-agent — הוא יעשה upsert פנימי ──────────────────────
-        data = await _agent_post(
+        data = await _agent_post_with_retry(
             host["ip_address"],
             "/api/phones/provision",
             {
@@ -208,8 +229,10 @@ async def provision_phone(
                 "nickname":    body.nickname,
                 "tag":         body.tag,
                 "userId":      user["uid"],
-                "isNew":       is_new,   # ← Agent יודע אם ליצור container
+                "isNew":       is_new,
             },
+            retries=3,
+            delay=2.0,
         )
 
         phone_id = data.get("phoneId") or (phone["id"] if phone else None)
@@ -220,21 +243,23 @@ async def provision_phone(
         )
 
         return {
-            "phone_id":          phone_id,
-            "phone_number":      clean_number,
-            "is_new":            is_new,
-            "status":            data.get("status", "qr_ready"),
-            "qr_image_base64":   data.get("qrImageBase64"),
-            "qr_code":           data.get("qrCode"),
-            "qr_refresh_url":    data.get("qrRefreshUrl"),
-            "message":           data.get("message"),
-            "host_name":         host["host_name"],
+            "phone_id":        phone_id,
+            "phone_number":    clean_number,
+            "is_new":          is_new,
+            "status":          data.get("status", "qr_ready"),
+            "qr_image_base64": data.get("qrImageBase64"),
+            "qr_code":         data.get("qrCode"),
+            "qr_refresh_url":  data.get("qrRefreshUrl"),
+            "message":         data.get("message"),
+            "host_name":       host["host_name"],
         }
 
     except httpx.HTTPStatusError as e:
+        logger.error(f"[PROVISION] Agent HTTP error: {e.response.status_code} {e.response.text}")
         raise HTTPException(status_code=502, detail=f"Agent error: {e.response.text}")
     except httpx.RequestError as e:
-        raise HTTPException(status_code=503, detail="Agent unreachable")
+        logger.error(f"[PROVISION] Agent unreachable after retries: {e}")
+        raise HTTPException(status_code=503, detail="Agent unreachable after 3 attempts")
 
 
 @router.get("/{phone_id}/qrcode")
@@ -316,12 +341,11 @@ async def send_text_message(
         raise HTTPException(status_code=400, detail="jid and text are required")
 
     try:
-        data = await _agent_post(
+        return await _agent_post(
             host["ip_address"],
             f"/api/phones/{phone_id}/send/text",
             {"jid": jid, "text": text},
         )
-        return data
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=502, detail=f"Agent error: {e.response.text}")
     except httpx.RequestError:
