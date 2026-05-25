@@ -49,6 +49,7 @@ python3 -m py_compile ./routers/messages.py && echo OK || echo FAIL
 python3 -m py_compile ./dependencies.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/calls.py && echo OK || echo FAIL
 
+python3 -m py_compile ./routers/proxy_media.py && echo OK || echo FAIL
 
 
 # LOGGING
