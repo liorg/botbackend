@@ -5,23 +5,18 @@ from pydantic import BaseModel
 from typing import Optional
 import uuid
 
-# ── Router mounted at /phones/{phone_id}/scenarios ─────────────────────────
-# Include in main.py as:
-#   from routers import scenarios
-#   app.include_router(scenarios.router)
-
 router = APIRouter(prefix="/phones/{phone_id}/scenarios", tags=["scenarios"])
 
 
 # ── Schemas ────────────────────────────────────────────────────────────────
 
 class ScenarioCreate(BaseModel):
-    contact_id: Optional[str] = None          # bot contact
+    contact_id: Optional[str] = None
     name: str
     status: Optional[str] = "draft"
     config: Optional[dict] = {}
-    estimated_duration_minutes: Optional[str] = None   # "00:05:00"
-    inter_leaf_response_time: Optional[str] = None     # "00:00:10"
+    estimated_duration_minutes: Optional[str] = None
+    inter_leaf_response_time: Optional[str] = None
 
 
 class ScenarioUpdate(BaseModel):
@@ -33,7 +28,7 @@ class ScenarioUpdate(BaseModel):
     inter_leaf_response_time: Optional[str] = None
 
 
-# ── List ───────────────────────────────────────────────────────────────────
+# ── List scenarios ─────────────────────────────────────────────────────────
 @router.get("/")
 async def list_scenarios(phone_id: str, db: Client = Depends(get_supabase)):
     result = (
@@ -97,7 +92,7 @@ async def create_scenario(
     return result.data[0]
 
 
-# ── Update (PUT — full replace of mutable fields) ─────────────────────────
+# ── Update ─────────────────────────────────────────────────────────────────
 @router.put("/{scenario_id}")
 async def update_scenario(
     phone_id: str, scenario_id: str, body: ScenarioUpdate,

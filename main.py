@@ -3,7 +3,7 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import auth, phones, contacts, scenarios, schedules, calls, messages ,proxy_media
+from routers import auth, phones, contacts, scenarios, schedules, calls, messages ,proxy_media,phones_contacts
 
 from supabase import create_client
 from dotenv import load_dotenv
@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from logging_config import get_logger, logging_middleware
 
 load_dotenv()  # ← חייב להיות לפני הכל
-version="1.0.0.58"
+version="1.0.0.60"
 logger = get_logger("main")
 
 app = FastAPI(title="ScenarioBot API", version=version)
@@ -64,6 +64,7 @@ app.include_router(schedules.router, prefix="/api")
 app.include_router(calls.router, prefix="/api")
 app.include_router(messages.router, prefix="/api") 
 app.include_router(proxy_media.router, prefix="/api") 
+app.include_router(phones_contacts.router, prefix="/api")   # GET /api/phones/{phone_id}/contacts/active
 
 
 # ── Startup/Shutdown Events ───────────────────────────────────
