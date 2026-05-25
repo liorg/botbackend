@@ -1,32 +1,47 @@
-# routers/messages.py או routers/media.py
+# routers/proxy_media.py
 import io
+import os
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from dependencies import get_supabase, get_current_user
+from dependencies import get_supabase
 from supabase import Client
+
+router = APIRouter(prefix="/messages", tags=["media"])  # ← חסר!
+
+BACKEND_URL = os.getenv("BACKEND_URL", "https://vid.michal-solutions.com/api")
+
+async def _get_agent_api_port(db: Client, phone_id: str):
+    try:
+        res = (
+            db.table("phones")
+            .select("api_port, agent_hosts(ip_address)")
+            .eq("id", phone_id)
+            .limit(1)
+            .execute()
+        )
+        if not res.data:
+            return None, None
+        phone    = res.data[0]
+        api_port = phone.get("api_port")
+        host     = phone.get("agent_hosts") or {}
+        ip       = host.get("ip_address")
+        return ip, api_port
+    except Exception:
+        return None, None
 
 @router.get("/media/{phone_id}/{message_id}")
 async def proxy_media(
     phone_id: str,
     message_id: str,
-    user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
-    """Proxy תמונות/אודיו — מסתיר את ה-agent"""
-    # ── שלוף agent IP מה-DB ──────────────────────────────────────
-    agent_info = await _get_agent_ip_for_phone(db, phone_id)
-    if not agent_info:
+    ip, api_port = await _get_agent_api_port(db, phone_id)
+    if not ip or not api_port:
         raise HTTPException(404, "Agent not found")
-    
-    agent_ip, _ = agent_info
-    
-    # ── השתמש ב-FastAPI port (8970 וכו') ─────────────────────────
-    phone_res = db.table("phones").select("api_port").eq("id", phone_id).limit(1).execute()
-    api_port  = (phone_res.data or [{}])[0].get("api_port", 8000)
-    
-    agent_url = f"http://{agent_ip}:{api_port}/media/{message_id}"
-    
+
+    agent_url = f"http://{ip}:{api_port}/media/{message_id}"
+
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.get(agent_url)
