@@ -51,7 +51,7 @@ python3 -m py_compile ./routers/calls.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/phones_contacts.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/proxy_media.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/scenarios.py && echo OK || echo FAIL
-
+python3 -m py_compile ./routers/calls.py && echo OK || echo FAIL
 
 # LOGGING
 
@@ -68,5 +68,5 @@ sudo journalctl -u whatsapp-manager -n 50
 
 # Git
 git add .
-git commit --m 'version 1.61'
+git commit --m 'version 1.62'
 git push
