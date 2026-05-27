@@ -10,8 +10,6 @@ router = APIRouter(prefix="/calls", tags=["calls"])
 BACKEND_URL = os.getenv("BACKEND_URL", "https://vid.michal-solutions.com/api")
 
 
-# ── Schemas ───────────────────────────────────────────────────────────
-
 class StartCallRequest(BaseModel):
     phone_id:         str
     contact_id:       str
@@ -23,8 +21,6 @@ class EndCallRequest(BaseModel):
     call_id: str
     status:  str = "completed"
 
-
-# ── Helpers ───────────────────────────────────────────────────────────
 
 async def _get_agent_info(db: Client, phone_id: str):
     res = (
@@ -47,17 +43,15 @@ async def _get_agent_info(db: Client, phone_id: str):
 async def _get_contact_number(db: Client, contact_id: str) -> str:
     res = (
         db.table("contacts")
-        .select("phone_number")
+        .select("number")
         .eq("id", contact_id)
         .limit(1)
         .execute()
     )
     if not res.data:
         return ""
-    return res.data[0].get("phone_number", "")
+    return res.data[0].get("number", "")
 
-
-# ── Endpoints ─────────────────────────────────────────────────────────
 
 @router.post("/start")
 async def start_call(
