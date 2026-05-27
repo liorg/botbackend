@@ -53,6 +53,13 @@ async def _get_contact_number(db: Client, contact_id: str) -> str:
     return res.data[0].get("number", "")
 
 
+async def _get_all_contact_ids(db: Client, contact_id: str) -> list[str]:
+    """מחזיר את ה-contact ואת כל ילדיו (draft contacts)"""
+    child_res = db.table("contacts").select("id").eq("parent_contact_id", contact_id).execute()
+    child_ids = [c["id"] for c in (child_res.data or [])]
+    return [contact_id] + child_ids
+
+
 @router.post("/start")
 async def start_call(
     body: StartCallRequest,
@@ -124,27 +131,27 @@ async def poll_call_messages(
     if not call_res.data:
         raise HTTPException(404, "Call not found")
 
-    call       = call_res.data[0]
-    from_ts    = since or call.get("started_at") or ""
-    contact_id = call["contact_id"]
+    call         = call_res.data[0]
+    contact_ids  = await _get_all_contact_ids(db, call["contact_id"])
 
-    # מצא גם draft child contacts (parent_contact_id = contact_id)
-    child_res  = db.table("contacts").select("id").eq("parent_contact_id", contact_id).execute()
-    child_ids  = [c["id"] for c in (child_res.data or [])]
-    all_contacts = [contact_id] + child_ids
+    # since = מה הלקוח שלח, אם אין — השתמש ב-started_at
+    from_ts = since or call.get("started_at") or ""
 
     query = (
         db.table("messages")
         .select("id, contact_id, phone_id, sender, content, sent_at, direction, media_url")
         .eq("phone_id", call["phone_id"])
-        .in_("contact_id", all_contacts)
+        .in_("contact_id", contact_ids)
         .order("sent_at")
+        .limit(200)
     )
+    # החל filter רק אם יש since
     if from_ts:
         query = query.gte("sent_at", from_ts)
 
-    msgs_res = query.limit(200).execute()
+    msgs_res = query.execute()
 
+    # עדכן סטטוס אם עבר expected_end
     call_status = call.get("status", "active")
     expected    = call.get("expected_end")
     if call_status == "active" and expected:
@@ -172,6 +179,11 @@ async def poll_call_messages(
         "expected_end": expected,
         "ended_at":     call.get("ended_at"),
         "messages":     messages,
+        "debug": {
+            "contact_ids": contact_ids,
+            "from_ts":     from_ts,
+            "msg_count":   len(messages),
+        }
     }
 
 
