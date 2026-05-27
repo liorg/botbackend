@@ -124,14 +124,20 @@ async def poll_call_messages(
     if not call_res.data:
         raise HTTPException(404, "Call not found")
 
-    call    = call_res.data[0]
-    from_ts = since or call.get("started_at") or ""
+    call       = call_res.data[0]
+    from_ts    = since or call.get("started_at") or ""
+    contact_id = call["contact_id"]
+
+    # מצא גם draft child contacts (parent_contact_id = contact_id)
+    child_res  = db.table("contacts").select("id").eq("parent_contact_id", contact_id).execute()
+    child_ids  = [c["id"] for c in (child_res.data or [])]
+    all_contacts = [contact_id] + child_ids
 
     query = (
         db.table("messages")
         .select("id, contact_id, phone_id, sender, content, sent_at, direction, media_url")
-        .eq("phone_id",   call["phone_id"])
-        .eq("contact_id", call["contact_id"])
+        .eq("phone_id", call["phone_id"])
+        .in_("contact_id", all_contacts)
         .order("sent_at")
     )
     if from_ts:
