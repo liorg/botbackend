@@ -25,7 +25,13 @@ class MessagePayload(BaseModel):
     message_id: str
     phone_id:   str
     contact_id: str
-    direction:  bool
+    direction:  str | bool   # "incoming"/"outgoing" או true/false
+
+    @property
+    def is_incoming(self) -> bool:
+        if isinstance(self.direction, bool):
+            return self.direction
+        return str(self.direction).lower() == "incoming" 
 
 
 async def _resolve_call_id(db: Client, phone_id: str, contact_id: str) -> str | None:
