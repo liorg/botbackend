@@ -1,13 +1,15 @@
-# cleanup_job.py — background task עם asyncio בלבד, ללא תלויות חיצוניות
-import asyncio
-import logging
+# cleanup_job.py
+import asyncio, logging, os
 from datetime import datetime, timezone
-from dependencies import get_supabase_direct
+from supabase import create_client
 
 logger = logging.getLogger(__name__)
 
+def _db():
+    return create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+
 async def _run_cleanup():
-    db  = get_supabase_direct()
+    db  = _db()
     now = datetime.now(timezone.utc).isoformat()
     try:
         expired = (
@@ -30,25 +32,22 @@ async def _run_cleanup():
               .eq("contact_id", call["contact_id"]) \
               .execute()
 
-            logger.info("[CLEANUP] Expired call=%s closed", call["id"])
+            logger.info("[CLEANUP] call=%s closed", call["id"])
 
     except Exception as e:
         logger.error("[CLEANUP] Error: %s", e)
 
-
 async def cleanup_loop():
-    """רץ לנצח — בדיקה כל 60 שניות"""
     while True:
         await asyncio.sleep(60)
         await _run_cleanup()
-
 
 _task = None
 
 def start_cleanup():
     global _task
     _task = asyncio.create_task(cleanup_loop())
-    logger.info("[CLEANUP] Background task started")
+    logger.info("[CLEANUP] Started")
 
 def stop_cleanup():
     global _task

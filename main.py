@@ -1,18 +1,18 @@
 #main.py
 import os
-
+from cleanup_job import start_cleanup, stop_cleanup
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers import auth, phones, contacts, scenarios, schedules, calls, messages ,proxy_media,phones_contacts,webhook_registrations
 
 from supabase import create_client
 from dotenv import load_dotenv
-from cleanup_job import start_cleanup, stop_cleanup
+
 # Import centralized logging
 from logging_config import get_logger, logging_middleware
 
 load_dotenv()  # ← חייב להיות לפני הכל
-version="1.0.0.71"
+version="1.0.0.7172"
 logger = get_logger("main")
 
 app = FastAPI(title="ScenarioBot API", version=version)
@@ -103,14 +103,12 @@ def whoami():
         "supabase": "connected",
         "users_count": result.count
     }
-
 @app.on_event("startup")
 async def startup():
-    logger.info("ScenarioBot API starting")
-    start_cleanup()   # ← הוסף
- 
+    logger.info("ScenarioBot API starting", ...)
+    start_cleanup()  # ← הוסף
+
 @app.on_event("shutdown")
 async def shutdown():
-    logger.info("ScenarioBot API shutting down")
-    stop_cleanup()    # ← הוסף
- 
+    logger.info("ScenarioBot API shutting down", ...)
+    stop_cleanup()   # ← הוסף
