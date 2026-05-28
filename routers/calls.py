@@ -144,22 +144,12 @@ async def poll_call_messages(
 
     call = call_res.data[0]
 
-    # ── אסוף contact_ids: call + scenario + כל הילדים ──────────────────────
-    contact_ids = set()
-    contact_ids.add(call["contact_id"])
-
-    if call.get("scenario_id"):
-        sc_res = db.table("scenarios").select("contact_id").eq("id", call["scenario_id"]).limit(1).execute()
-        sc_contact = (sc_res.data or [{}])[0].get("contact_id")
-        if sc_contact:
-            contact_ids.add(sc_contact)
-
-    for cid in list(contact_ids):
-        child_res = db.table("contacts").select("id").eq("parent_contact_id", cid).execute()
-        for c in (child_res.data or []):
-            contact_ids.add(c["id"])
-
-    all_ids = list(contact_ids)
+    # ── חפש הודעות לפי contact_id + phone_id ────────────────────────────────
+    # (call_id יאוכלס בעתיד אחרי מימוש C# dispatch)
+    contact_id = call["contact_id"]
+    child_res  = db.table("contacts").select("id").eq("parent_contact_id", contact_id).execute()
+    child_ids  = [c["id"] for c in (child_res.data or [])]
+    all_ids    = [contact_id] + child_ids
 
     # השתמש ב-since אם נשלח, אחרת started_at
     from_ts = since or call.get("started_at") or ""
