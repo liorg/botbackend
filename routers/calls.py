@@ -128,6 +128,7 @@ async def start_call(
 async def poll_call_messages(
     call_id: str,
     since:   str | None = Query(None),
+    limit:   int        = Query(50, le=200),
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
@@ -143,40 +144,28 @@ async def poll_call_messages(
 
     call = call_res.data[0]
 
-    # ── חפש הודעות לפי call_id ישירות ───────────────────────────────────────
-    query = (
+    # ── חפש הודעות לפי contact_id + phone_id ────────────────────────────────
+    # (call_id יאוכלס בעתיד אחרי מימוש C# dispatch)
+    contact_id = call["contact_id"]
+    child_res  = db.table("contacts").select("id").eq("parent_contact_id", contact_id).execute()
+    child_ids  = [c["id"] for c in (child_res.data or [])]
+    all_ids    = [contact_id] + child_ids
+
+    # השתמש ב-since אם נשלח, אחרת started_at
+    from_ts = since or call.get("started_at") or ""
+
+    q = (
         db.table("messages")
         .select("id, contact_id, phone_id, sender, content, sent_at, direction, media_url")
-        .eq("call_id", call_id)
+        .eq("phone_id", call["phone_id"])
+        .in_("contact_id", all_ids)
         .order("sent_at")
-        .limit(200)
+        .limit(limit)
     )
-    if since:
-        query = query.gte("sent_at", since)
+    if from_ts:
+        q = q.gte("sent_at", from_ts)
 
-    msgs_res = query.execute()
-    msgs     = msgs_res.data or []
-
-    # ── fallback: אם אין הודעות עם call_id — חפש לפי contact+phone+started_at
-    if not msgs:
-        contact_id = call["contact_id"]
-        child_res  = db.table("contacts").select("id").eq("parent_contact_id", contact_id).execute()
-        child_ids  = [c["id"] for c in (child_res.data or [])]
-        all_ids    = [contact_id] + child_ids
-        from_ts    = since or call.get("started_at") or ""
-
-        q2 = (
-            db.table("messages")
-            .select("id, contact_id, phone_id, sender, content, sent_at, direction, media_url")
-            .eq("phone_id", call["phone_id"])
-            .in_("contact_id", all_ids)
-            .order("sent_at")
-            .limit(200)
-        )
-        if from_ts:
-            q2 = q2.gte("sent_at", from_ts)
-
-        msgs = q2.execute().data or []
+    msgs = q.execute().data or []
 
     # ── עדכן סטטוס אם עבר expected_end ──────────────────────────────────────
     call_status = call.get("status", "active")
