@@ -53,13 +53,6 @@ async def _get_contact_number(db: Client, contact_id: str) -> str:
     return res.data[0].get("number", "")
 
 
-async def _get_all_contact_ids(db: Client, contact_id: str) -> list[str]:
-    """מחזיר את ה-contact ואת כל ילדיו (draft contacts)"""
-    child_res = db.table("contacts").select("id").eq("parent_contact_id", contact_id).execute()
-    child_ids = [c["id"] for c in (child_res.data or [])]
-    return [contact_id] + child_ids
-
-
 @router.post("/start")
 async def start_call(
     body: StartCallRequest,
@@ -92,6 +85,23 @@ async def start_call(
 
     if not ins.data:
         raise HTTPException(500, "Failed to create call record")
+
+    # ── רשום webhook לקבלת הודעות נכנסות ─────────────────────────────────
+    callback_url = f"{BACKEND_URL}/webhook-registrations/callback/{body.phone_id}/{body.contact_id}"
+    db.table("webhook_registrations") \
+      .delete() \
+      .eq("phone_id",   body.phone_id) \
+      .eq("contact_id", body.contact_id) \
+      .execute()
+    db.table("webhook_registrations").insert({
+        "id":           str(uuid.uuid4()),
+        "phone_id":     body.phone_id,
+        "contact_id":   body.contact_id,
+        "callback_url": callback_url,
+        "type":         "recording",
+        "is_active":    True,
+        "created_at":   now.isoformat(),
+    }).execute()
 
     try:
         async with httpx.AsyncClient(timeout=10) as c:
@@ -131,27 +141,44 @@ async def poll_call_messages(
     if not call_res.data:
         raise HTTPException(404, "Call not found")
 
-    call         = call_res.data[0]
-    contact_ids  = await _get_all_contact_ids(db, call["contact_id"])
+    call = call_res.data[0]
 
-    # since = מה הלקוח שלח, אם אין — השתמש ב-started_at
-    from_ts = since or call.get("started_at") or ""
-
+    # ── חפש הודעות לפי call_id ישירות ───────────────────────────────────────
     query = (
         db.table("messages")
         .select("id, contact_id, phone_id, sender, content, sent_at, direction, media_url")
-        .eq("phone_id", call["phone_id"])
-        .in_("contact_id", contact_ids)
+        .eq("call_id", call_id)
         .order("sent_at")
         .limit(200)
     )
-    # החל filter רק אם יש since
-    if from_ts:
-        query = query.gte("sent_at", from_ts)
+    if since:
+        query = query.gte("sent_at", since)
 
     msgs_res = query.execute()
+    msgs     = msgs_res.data or []
 
-    # עדכן סטטוס אם עבר expected_end
+    # ── fallback: אם אין הודעות עם call_id — חפש לפי contact+phone+started_at
+    if not msgs:
+        contact_id = call["contact_id"]
+        child_res  = db.table("contacts").select("id").eq("parent_contact_id", contact_id).execute()
+        child_ids  = [c["id"] for c in (child_res.data or [])]
+        all_ids    = [contact_id] + child_ids
+        from_ts    = since or call.get("started_at") or ""
+
+        q2 = (
+            db.table("messages")
+            .select("id, contact_id, phone_id, sender, content, sent_at, direction, media_url")
+            .eq("phone_id", call["phone_id"])
+            .in_("contact_id", all_ids)
+            .order("sent_at")
+            .limit(200)
+        )
+        if from_ts:
+            q2 = q2.gte("sent_at", from_ts)
+
+        msgs = q2.execute().data or []
+
+    # ── עדכן סטטוס אם עבר expected_end ──────────────────────────────────────
     call_status = call.get("status", "active")
     expected    = call.get("expected_end")
     if call_status == "active" and expected:
@@ -171,19 +198,14 @@ async def poll_call_messages(
     phone_number = (phone_res.data or [{}])[0].get("number", "")
 
     from routers.messages import format_message
-    messages = [format_message(m, phone_number, call["phone_id"]) for m in (msgs_res.data or [])]
+    messages = [format_message(m, phone_number, call["phone_id"]) for m in msgs]
 
     return {
-        "call_id":      call_id,
-        "call_status":  call_status,
+        "call_id":     call_id,
+        "call_status": call_status,
         "expected_end": expected,
-        "ended_at":     call.get("ended_at"),
-        "messages":     messages,
-        "debug": {
-            "contact_ids": contact_ids,
-            "from_ts":     from_ts,
-            "msg_count":   len(messages),
-        }
+        "ended_at":    call.get("ended_at"),
+        "messages":    messages,
     }
 
 
@@ -206,6 +228,18 @@ async def end_call(
     )
     if not res.data:
         raise HTTPException(404, "Call not found")
+
+    # ── בטל רישום webhook ──────────────────────────────────────────────────
+    call_data = res.data[0]
+    try:
+        db.table("webhook_registrations") \
+          .delete() \
+          .eq("phone_id",   call_data.get("phone_id", "")) \
+          .eq("contact_id", call_data.get("contact_id", "")) \
+          .execute()
+    except Exception:
+        pass
+
     return {"call_id": body.call_id, "status": body.status, "ended_at": now}
 
 
