@@ -52,7 +52,7 @@ python3 -m py_compile ./routers/phones_contacts.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/proxy_media.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/scenarios.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/calls.py && echo OK || echo FAIL
-
+python3 -m py_compile ./routers/webhook_registrations.py && echo OK || echo FAIL
 # LOGGING
 
 journalctl -u fastapi.service -n 50 --no-pager | grep -i "phones\|list\|uid"
