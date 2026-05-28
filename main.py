@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from logging_config import get_logger, logging_middleware
 
 load_dotenv()  # ← חייב להיות לפני הכל
-version="1.0.0.69"
+version="1.0.0.70"
 logger = get_logger("main")
 
 app = FastAPI(title="ScenarioBot API", version=version)

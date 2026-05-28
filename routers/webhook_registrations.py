@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from dependencies import get_supabase, get_current_user
 from supabase import Client
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uuid, logging
 from datetime import datetime, timezone
 
@@ -22,28 +22,19 @@ class RegisterRequest(BaseModel):
 
 
 class MessagePayload(BaseModel):
-    message_id: str
-    phone_id:   str
-    contact_id: str
-    direction:  str | bool   # "incoming"/"outgoing" או true/false
+    MessageId:  str = Field(alias="MessageId", default="")
+    PhoneId:    str = Field(alias="PhoneId",   default="")
+    ContactId:  str = Field(alias="ContactId", default="")
+    Direction:  bool = Field(alias="Direction", default=False)
 
-    @property
-    def is_incoming(self) -> bool:
-        if isinstance(self.direction, bool):
-            return self.direction
-        return str(self.direction).lower() == "incoming" 
+    model_config = {"populate_by_name": True}
 
 
 async def _resolve_call_id(db: Client, phone_id: str, contact_id: str) -> str | None:
-    """
-    מחפש call active לפי phone_id + contact_id (כולל parent contact).
-    מחזיר call_id או None.
-    """
-    # חפש לפי contact ישיר
     res = (
         db.table("calls")
         .select("id")
-        .eq("phone_id",  phone_id)
+        .eq("phone_id",   phone_id)
         .eq("contact_id", contact_id)
         .eq("status", "active")
         .order("created_at", desc=True)
@@ -53,7 +44,6 @@ async def _resolve_call_id(db: Client, phone_id: str, contact_id: str) -> str | 
     if res.data:
         return res.data[0]["id"]
 
-    # חפש לפי parent contact
     contact_res = (
         db.table("contacts")
         .select("parent_contact_id")
@@ -88,9 +78,8 @@ async def register_webhook(
     db.table("webhook_registrations").delete() \
       .eq("phone_id",   body.phone_id) \
       .eq("contact_id", body.contact_id).execute()
-    reg_id = str(uuid.uuid4())
     db.table("webhook_registrations").insert({
-        "id":           reg_id,
+        "id":           str(uuid.uuid4()),
         "phone_id":     body.phone_id,
         "contact_id":   body.contact_id,
         "callback_url": callback_url,
@@ -98,7 +87,7 @@ async def register_webhook(
         "is_active":    True,
         "created_at":   datetime.now(timezone.utc).isoformat(),
     }).execute()
-    return {"registration_id": reg_id, "callback_url": callback_url}
+    return {"callback_url": callback_url}
 
 
 @router.delete("/unregister")
@@ -121,39 +110,27 @@ async def receive_callback(
     body: MessagePayload,
     db: Client = Depends(get_supabase),
 ):
-    """
-    ה-agent קורא לכאן אחרי כל הודעה.
-    1. מחפש call active לפי phone_id + contact_id
-    2. אם נמצא — מעדכן call_id על ההודעה
-    3. שומר message_id ב-memory לפולינג
-    """
-    # ── 1. חפש call active ────────────────────────────────────────
-    call_id = await _resolve_call_id(db, phone_id, contact_id)
+    message_id = body.MessageId
+    call_id    = await _resolve_call_id(db, phone_id, contact_id)
 
-    # ── 2. עדכן call_id על ההודעה ────────────────────────────────
-    if call_id:
+    if call_id and message_id:
         try:
             db.table("messages") \
               .update({"call_id": call_id}) \
-              .eq("id", body.message_id) \
+              .eq("id", message_id) \
               .execute()
-            logger.info("[CALLBACK] Linked msg=%s → call=%s", body.message_id, call_id)
+            logger.info("[CALLBACK] msg=%s → call=%s", message_id, call_id)
         except Exception as e:
             logger.warning("[CALLBACK] Failed to update call_id: %s", e)
 
-    # ── 3. שמור ב-memory לפולינג ──────────────────────────────────
     k = _key(phone_id, contact_id)
-    if k not in _pending:
-        _pending[k] = []
-    _pending[k].append({
-        "message_id": body.message_id,
+    _pending.setdefault(k, []).append({
+        "message_id": message_id,
         "phone_id":   phone_id,
         "contact_id": contact_id,
-        "direction":  body.direction,
+        "direction":  body.Direction,
         "call_id":    call_id,
     })
-    logger.info("[CALLBACK] phone=%s contact=%s msg=%s call=%s",
-                phone_id, contact_id, body.message_id, call_id)
     return {"ok": True, "call_id": call_id}
 
 
@@ -169,7 +146,7 @@ async def poll_messages(
     if not msgs:
         return {"messages": []}
 
-    ids          = [m["message_id"] for m in msgs]
+    ids          = [m["message_id"] for m in msgs if m.get("message_id")]
     phone_res    = db.table("phones").select("number").eq("id", phone_id).limit(1).execute()
     phone_number = (phone_res.data or [{}])[0].get("number", "")
 
