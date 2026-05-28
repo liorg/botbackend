@@ -41,6 +41,7 @@ ocs
 
 ## Compile
 python3 -m py_compile main.py && echo OK || echo FAIL
+python3 -m py_compile cleanup_job.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/auth.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/phones.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/contacts.py && echo OK || echo FAIL
@@ -68,5 +69,5 @@ sudo journalctl -u whatsapp-manager -n 50
 
 # Git
 git add .
-git commit --m 'version 1.70'
+git commit --m 'version 1.71'
 git push
