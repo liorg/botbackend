@@ -54,6 +54,7 @@ python3 -m py_compile ./routers/proxy_media.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/scenarios.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/calls.py && echo OK || echo FAIL
 python3 -m py_compile ./routers/webhook_registrations.py && echo OK || echo FAIL
+python3 -m py_compile ./routers/compile_check.py && echo OK || echo FAIL
 # LOGGING
 
 journalctl -u fastapi.service -n 50 --no-pager | grep -i "phones\|list\|uid"
@@ -69,5 +70,5 @@ sudo journalctl -u whatsapp-manager -n 50
 
 # Git
 git add .
-git commit --m 'version 1.73'
+git commit --m 'version x.1'
 git push
