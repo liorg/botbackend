@@ -20,19 +20,21 @@ async def _run_cleanup():
             .execute()
         )
         for call in (expired.data or []):
+            # ── סטטוס → completed, לא מוחק ──────────────────────────
             db.table("calls").update({
                 "status":                 "completed",
                 "ended_at":               now,
                 "last_status_updated_at": now,
             }).eq("id", call["id"]).execute()
 
+            # ── webhook → is_active=False, לא מוחק ───────────────────
             db.table("webhook_registrations") \
-              .delete() \
+              .update({"is_active": False}) \
               .eq("phone_id",   call["phone_id"]) \
               .eq("contact_id", call["contact_id"]) \
               .execute()
 
-            logger.info("[CLEANUP] call=%s closed", call["id"])
+            logger.info("[CLEANUP] call=%s → completed", call["id"])
 
     except Exception as e:
         logger.error("[CLEANUP] Error: %s", e)
