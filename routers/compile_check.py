@@ -1,43 +1,38 @@
 # routers/compile_check.py
-# FastAPI router — מקבל קוד TypeScript מה-frontend, מעביר ל-Deno לבדיקה
-# mount ב-main.py: app.include_router(compile_router, prefix="/api")
-
 import os
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Literal, Optional
 
 compile_router = APIRouter(prefix="/scenarios", tags=["compile"])
 
-DENO_URL = os.getenv("DENO_COMPILE_URL", "http://localhost:8765")
-DENO_TIMEOUT = 15.0  # seconds
+DENO_URL     = os.getenv("DENO_COMPILE_URL", "http://localhost:8765")
+DENO_TIMEOUT = 15.0
 
 
 class CompileRequest(BaseModel):
-    code: str
+    code:      str
     card_type: Literal["sender", "expect"] = "sender"
 
 
 class CompileResponse(BaseModel):
-    ok: bool
-    errors: list[str] = []
-    output: Optional[dict] = None
-    type_errors: list[str] = []
+    ok:          bool        = False
+    errors:      list[str]   = []
+    output:      Optional[dict] = None
+    type_errors: list[str]   = []
 
 
 @compile_router.post("/compile-check", response_model=CompileResponse)
 async def compile_check(req: CompileRequest):
-    """
-    מקבל קוד TypeScript מה-designer, שולח ל-Deno לבדיקת סוגים + ריצת test,
-    מחזיר { ok, errors, output, type_errors }
-    """
+    # ── validations ──────────────────────────────────────────────────────────
     if not req.code or not req.code.strip():
-        raise HTTPException(status_code=400, detail="code is required")
+        return CompileResponse(ok=False, errors=["code is required"])
 
     if len(req.code) > 50_000:
-        raise HTTPException(status_code=400, detail="code too large (max 50KB)")
+        return CompileResponse(ok=False, errors=["code too large (max 50KB)"])
 
+    # ── call Deno ─────────────────────────────────────────────────────────────
     try:
         async with httpx.AsyncClient(timeout=DENO_TIMEOUT) as client:
             resp = await client.post(
@@ -49,9 +44,10 @@ async def compile_check(req: CompileRequest):
             data = resp.json()
 
     except httpx.ConnectError:
-        raise HTTPException(
-            status_code=503,
-            detail="Deno compile server is not running. Start with: deno run --allow-net --allow-read --allow-write --allow-env deno_compile_server.ts"
+        # ✅ Deno לא רץ — לא מפיל את האפליקציה
+        return CompileResponse(
+            ok=False,
+            errors=["שרת ה-Deno לא פעיל — compile-check אינו זמין כרגע"],
         )
     except httpx.TimeoutException:
         return CompileResponse(
@@ -59,9 +55,15 @@ async def compile_check(req: CompileRequest):
             errors=["timeout: הקוד רץ יותר מ-15 שניות"],
         )
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"Deno error: {e.response.text[:200]}")
+        return CompileResponse(
+            ok=False,
+            errors=[f"Deno error: {e.response.text[:200]}"],
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return CompileResponse(
+            ok=False,
+            errors=[f"שגיאה לא צפויה: {str(e)}"],
+        )
 
     return CompileResponse(
         ok=data.get("ok", False),
