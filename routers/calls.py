@@ -120,16 +120,10 @@ async def start_call(
 
 def _upsert_webhook(
     db: Client,
-    phone_id: str,
-    contact_id: str,
     callback_url: str,
     call_type: str,
     now: datetime,
 ):
-    """
-    לא מוחק — מכבה is_active=False את הישן, מוסיף חדש.
-    אם כבר קיים active באותו URL+type — משאיר.
-    """
     existing = (
         db.table("webhook_registrations")
         .select("id")
@@ -139,28 +133,24 @@ def _upsert_webhook(
         .execute()
     )
     if existing.data:
-        return  # כבר קיים — לא עושים כלום
+        return  # כבר קיים
 
-    # כבה ישנים מאותו phone+contact+type
+    # כבה ישנים באותו URL+type
     db.table("webhook_registrations") \
       .update({"is_active": False}) \
-      .eq("phone_id",   phone_id) \
-      .eq("contact_id", contact_id) \
-      .eq("type",       call_type) \
-      .eq("is_active",  True) \
+      .eq("callback_url", callback_url) \
+      .eq("type",         call_type) \
+      .eq("is_active",    True) \
       .execute()
 
     db.table("webhook_registrations").insert({
         "id":           str(uuid.uuid4()),
-        "phone_id":     phone_id,
-        "contact_id":   contact_id,
         "callback_url": callback_url,
         "type":         call_type,
         "status":       "active",
         "is_active":    True,
         "created_at":   now.isoformat(),
     }).execute()
-
 
 @router.get("/{call_id}/messages")
 async def poll_call_messages(

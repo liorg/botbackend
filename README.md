@@ -70,5 +70,5 @@ sudo journalctl -u whatsapp-manager -n 50
 
 # Git
 git add .
-git commit --m 'version x.1'
+git commit --m 'version x.12'
 git push
