@@ -69,36 +69,25 @@ async def _get_contact_number(db: Client, contact_id: str) -> str:
 
 
 def _upsert_webhook(db: Client, callback_url: str, call_type: str, now: datetime):
-    existing = (
-        db.table("webhook_registrations")
-        .select("id")
-        .eq("callback_url", callback_url)
-        .eq("type",         call_type)
-        .eq("is_active",    True)
-        .execute()
-    )
-    if existing.data:
-        logger.info("[WEBHOOK] Already active — skipping upsert. url=%s type=%s", callback_url, call_type)
-        return
-
-    db.table("webhook_registrations") \
-      .update({"is_active": False}) \
-      .eq("callback_url", callback_url) \
-      .eq("type",         call_type) \
-      .eq("is_active",    True) \
-      .execute()
-
-    db.table("webhook_registrations").insert({
-        "id":           str(uuid.uuid4()),
-        "callback_url": callback_url,
-        "type":         call_type,
-        "status":       "active",
-        "is_active":    True,
-        "created_at":   now.isoformat(),
-    }).execute()
-    logger.info("[WEBHOOK] Registered. url=%s type=%s", callback_url, call_type)
-
-
+    """
+    Upsert webhook registration — עמיד בפני race conditions.
+    משתמש ב-on_conflict של Supabase במקום SELECT+INSERT ידני.
+    """
+    try:
+        db.table("webhook_registrations").upsert(
+            {
+                "callback_url": callback_url,
+                "type":         call_type,
+                "status":       "active",
+                "is_active":    True,
+                "created_at":   now.isoformat(),
+            },
+            on_conflict="callback_url,type",   # ← unique constraint
+        ).execute()
+        logger.info("[WEBHOOK] Upserted. url=%s type=%s", callback_url, call_type)
+    except Exception as e:
+        logger.error("[WEBHOOK] Upsert failed. url=%s type=%s error=%s", callback_url, call_type, e)
+        
 def _deactivate_webhook(db: Client, callback_url: str):
     try:
         db.table("webhook_registrations") \
