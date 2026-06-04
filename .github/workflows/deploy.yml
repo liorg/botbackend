@@ -29,8 +29,8 @@ jobs:
             set -e
             echo "WHOAMI ="
             whoami
-            cd /home/lior/fastapi-app
+            cd /opt/fastapi-app
             git reset --hard
             git pull origin main
             ./venv/bin/pip install -r requirements.txt -q
-            sudo -n systemctl restart fastapi 
+            sudo -n systemctl restart fastapi
