@@ -1,8 +1,9 @@
+# scenarios_router.py
 from fastapi import APIRouter, Depends, HTTPException
 from dependencies import get_supabase
 from supabase import Client
 from pydantic import BaseModel
-from typing import Optional, Any
+from typing import Optional, Any, Literal
 import uuid
 
 router = APIRouter(prefix="/phones/{phone_id}/scenarios", tags=["scenarios"])
@@ -18,13 +19,14 @@ class ScenarioCreate(BaseModel):
     estimated_duration_minutes: Optional[str] = None
     inter_leaf_response_time: Optional[str] = None
     # ── Designer fields ────────────────────────────────────────────────────
-    canvas: Optional[list[dict[str, Any]]] = None      # ComponentCard array
-    arrow_data: Optional[dict[str, Any]] = None        # keyed by insertIndex
-    interval: Optional[dict[str, Any]] = None          # { mins, secs }
-    estimated_time: Optional[dict[str, Any]] = None    # { hours, mins, secs, totalSeconds, stepCount }
+    canvas: Optional[list[dict[str, Any]]] = None
+    arrow_data: Optional[dict[str, Any]] = None
+    interval: Optional[dict[str, Any]] = None
+    estimated_time: Optional[dict[str, Any]] = None
     use_auto_calc: Optional[bool] = True
     description: Optional[str] = None
-    bot_contact: Optional[dict[str, Any]] = None       # { id?, name?, phone? }
+    bot_contact: Optional[dict[str, Any]] = None
+    event_type: Optional[Literal["trigger", "scheduler"]] = "scheduler"   # ← default: scheduler
 
 
 class ScenarioUpdate(BaseModel):
@@ -42,13 +44,10 @@ class ScenarioUpdate(BaseModel):
     use_auto_calc: Optional[bool] = None
     description: Optional[str] = None
     bot_contact: Optional[dict[str, Any]] = None
+    event_type: Optional[Literal["trigger", "scheduler"]] = None
 
 
 def _merge_config(existing_config: dict, body) -> dict:
-    """
-    Merge designer fields into the config JSONB column.
-    Preserves existing keys, overwrites only what was sent.
-    """
     cfg = dict(existing_config or {})
     if body.canvas         is not None: cfg["canvas"]         = body.canvas
     if body.arrow_data     is not None: cfg["arrow_data"]     = body.arrow_data
@@ -63,10 +62,6 @@ def _merge_config(existing_config: dict, body) -> dict:
 
 
 def _expand_config(row: dict) -> dict:
-    """
-    Expose designer fields as top-level keys on the response,
-    so React receives them exactly as SplitDesigner expects.
-    """
     cfg = row.get("config") or {}
     row["canvas"]         = cfg.get("canvas", [])
     row["arrow_data"]     = cfg.get("arrow_data", {})
@@ -75,6 +70,8 @@ def _expand_config(row: dict) -> dict:
     row["use_auto_calc"]  = cfg.get("use_auto_calc", True)
     row["description"]    = cfg.get("description", "")
     row["bot_contact"]    = cfg.get("bot_contact")
+    # event_type — קרא מעמודה נפרדת, fallback ל-config לתאימות אחורה
+    row["event_type"]     = row.get("event_type") or cfg.get("event_type", "scheduler")
     return row
 
 
@@ -84,11 +81,34 @@ async def list_scenarios(phone_id: str, db: Client = Depends(get_supabase)):
     result = (
         db.table("scenarios")
         .select(
-            "id, phone_id, contact_id, name, status, config, "
+            "id, phone_id, contact_id, name, status, config, event_type, "
             "created_at, estimated_duration_minutes, inter_leaf_response_time, "
             "contacts(id, name, number, avatar, is_bot)"
         )
         .eq("phone_id", phone_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return [_expand_config(r) for r in (result.data or [])]
+
+
+# ── List by event_type ─────────────────────────────────────────────────────
+@router.get("/by-type/{event_type}")
+async def list_scenarios_by_type(
+    phone_id: str,
+    event_type: Literal["trigger", "scheduler"],
+    db: Client = Depends(get_supabase)
+):
+    result = (
+        db.table("scenarios")
+        .select(
+            "id, phone_id, contact_id, name, status, config, event_type, "
+            "created_at, estimated_duration_minutes, inter_leaf_response_time, "
+            "contacts(id, name, number, avatar, is_bot)"
+        )
+        .eq("phone_id", phone_id)
+        .eq("event_type", event_type)
+        .eq("status", "active")
         .order("created_at", desc=True)
         .execute()
     )
@@ -103,7 +123,7 @@ async def get_scenario(
     result = (
         db.table("scenarios")
         .select(
-            "id, phone_id, contact_id, name, status, config, "
+            "id, phone_id, contact_id, name, status, config, event_type, "
             "created_at, estimated_duration_minutes, inter_leaf_response_time, "
             "contacts(id, name, number, avatar, is_bot)"
         )
@@ -125,15 +145,16 @@ async def create_scenario(
     config = _merge_config({}, body)
 
     payload = {
-        "id":       str(uuid.uuid4()),
-        "phone_id": phone_id,
-        "name":     body.name,
-        "status":   body.status or "draft",
-        "config":   config,
+        "id":         str(uuid.uuid4()),
+        "phone_id":   phone_id,
+        "name":       body.name,
+        "status":     body.status or "draft",
+        "config":     config,
+        "event_type": body.event_type or "scheduler",
     }
-    if body.contact_id:                    payload["contact_id"]                  = body.contact_id
-    if body.estimated_duration_minutes:    payload["estimated_duration_minutes"]  = body.estimated_duration_minutes
-    if body.inter_leaf_response_time:      payload["inter_leaf_response_time"]    = body.inter_leaf_response_time
+    if body.contact_id:                 payload["contact_id"]                 = body.contact_id
+    if body.estimated_duration_minutes: payload["estimated_duration_minutes"] = body.estimated_duration_minutes
+    if body.inter_leaf_response_time:   payload["inter_leaf_response_time"]   = body.inter_leaf_response_time
 
     result = db.table("scenarios").insert(payload).execute()
     if not result.data:
@@ -141,13 +162,12 @@ async def create_scenario(
     return _expand_config(result.data[0])
 
 
-# ── Update (full save from SplitDesigner 💾) ───────────────────────────────
+# ── Update ─────────────────────────────────────────────────────────────────
 @router.put("/{scenario_id}")
 async def update_scenario(
     phone_id: str, scenario_id: str, body: ScenarioUpdate,
     db: Client = Depends(get_supabase)
 ):
-    # Fetch current config so we don't wipe unrelated keys
     existing = (
         db.table("scenarios")
         .select("config")
@@ -165,6 +185,7 @@ async def update_scenario(
     if body.name       is not None: payload["name"]       = body.name
     if body.status     is not None: payload["status"]     = body.status
     if body.contact_id is not None: payload["contact_id"] = body.contact_id
+    if body.event_type is not None: payload["event_type"] = body.event_type
     if body.estimated_duration_minutes is not None:
         payload["estimated_duration_minutes"] = body.estimated_duration_minutes
     if body.inter_leaf_response_time is not None:
