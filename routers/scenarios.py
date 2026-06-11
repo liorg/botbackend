@@ -168,6 +168,8 @@ async def update_scenario(
     phone_id: str, scenario_id: str, body: ScenarioUpdate,
     db: Client = Depends(get_supabase)
 ):
+    print(f"🔥 body.event_type: {body.event_type}")
+    print(f"🔥 payload will include: {body.dict()}")
     existing = (
         db.table("scenarios")
         .select("config")
@@ -178,7 +180,7 @@ async def update_scenario(
     )
     if not existing.data:
         raise HTTPException(status_code=404, detail="Scenario not found")
-    print(f"🔥 event_type received: {body.event_type}")  # ← הוסף
+
     config = _merge_config(existing.data.get("config") or {}, body)
 
     payload: dict = {"config": config}
