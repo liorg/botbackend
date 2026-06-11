@@ -1,233 +1,138 @@
-"""
-schedules_router.py  –  FastAPI CRUD for the `schedules` table
-"""
-from __future__ import annotations
-
-from datetime import datetime
-from typing import Optional
-from uuid import UUID
-
+# routers/schedules.py
 from fastapi import APIRouter, Depends, HTTPException, Query
+from dependencies import get_supabase
+from supabase import Client
 from pydantic import BaseModel
-import asyncpg
-
-from db import get_pool          # your existing asyncpg pool helper
-from auth import get_current_user  # your existing auth dependency
+from typing import Optional
+import uuid
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
 
-# ─────────────────────────────────────────────
-# Pydantic schemas
-# ─────────────────────────────────────────────
+# ── Schemas ────────────────────────────────────────────────────────────────
 
-class ScheduleBase(BaseModel):
-    phone_id:      Optional[UUID] = None
-    contact_id:    Optional[UUID] = None
-    scenario_id:   Optional[UUID] = None
-    schedule_name: Optional[str]  = None
-    schedule_type: str                        # hourly | daily | weekly | monthly | once
-    status:        Optional[str]  = "ready"  # ready | running | disabled
-    run_at:        Optional[datetime] = None
-    cron_expr:     Optional[str]  = None
-    interval_min:  Optional[int]  = None
-
-
-class ScheduleCreate(ScheduleBase):
-    pass
+class ScheduleCreate(BaseModel):
+    phone_id:      Optional[str] = None
+    contact_id:    Optional[str] = None
+    scenario_id:   Optional[str] = None
+    schedule_name: Optional[str] = None
+    schedule_type: str                       # hourly | daily | weekly | monthly | once
+    status:        Optional[str] = "ready"  # ready | running | disabled
+    run_at:        Optional[str] = None      # ISO string
+    cron_expr:     Optional[str] = None
+    interval_min:  Optional[int] = None
 
 
 class ScheduleUpdate(BaseModel):
-    """All fields optional for PATCH-style updates."""
-    phone_id:      Optional[UUID]     = None
-    contact_id:    Optional[UUID]     = None
-    scenario_id:   Optional[UUID]     = None
-    schedule_name: Optional[str]      = None
-    schedule_type: Optional[str]      = None
-    status:        Optional[str]      = None
-    run_at:        Optional[datetime] = None
-    cron_expr:     Optional[str]      = None
-    interval_min:  Optional[int]      = None
-    next_run:      Optional[datetime] = None
+    phone_id:      Optional[str] = None
+    contact_id:    Optional[str] = None
+    scenario_id:   Optional[str] = None
+    schedule_name: Optional[str] = None
+    schedule_type: Optional[str] = None
+    status:        Optional[str] = None
+    run_at:        Optional[str] = None
+    cron_expr:     Optional[str] = None
+    interval_min:  Optional[int] = None
+    next_run:      Optional[str] = None
 
 
-class ScheduleOut(ScheduleBase):
-    id:         UUID
-    last_run:   Optional[datetime] = None
-    next_run:   Optional[datetime] = None
-    created_at: Optional[datetime] = None
+# ── List ───────────────────────────────────────────────────────────────────
 
-    class Config:
-        from_attributes = True
-
-
-# ─────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────
-
-def _row_to_dict(row: asyncpg.Record) -> dict:
-    return dict(row)
-
-
-# ─────────────────────────────────────────────
-# Routes
-# ─────────────────────────────────────────────
-
-@router.get("/", response_model=list[ScheduleOut])
+@router.get("/")
 async def list_schedules(
-    phone_id: Optional[UUID] = Query(None),
-    status:   Optional[str]  = Query(None),
-    pool: asyncpg.Pool = Depends(get_pool),
-    user=Depends(get_current_user),
+    phone_id: Optional[str] = Query(None),
+    status:   Optional[str] = Query(None),
+    db: Client = Depends(get_supabase),
 ):
-    """List all schedules. Optionally filter by phone_id and/or status."""
-    conditions = []
-    args: list = []
-
+    q = db.table("schedules").select("*").order("created_at", desc=True)
     if phone_id:
-        args.append(phone_id)
-        conditions.append(f"phone_id = ${len(args)}")
-
+        q = q.eq("phone_id", phone_id)
     if status:
-        args.append(status)
-        conditions.append(f"status = ${len(args)}")
-
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-    sql = f"""
-        SELECT * FROM schedules
-        {where}
-        ORDER BY created_at DESC
-    """
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(sql, *args)
-    return [_row_to_dict(r) for r in rows]
+        q = q.eq("status", status)
+    result = q.execute()
+    return result.data or []
 
 
-@router.get("/{schedule_id}", response_model=ScheduleOut)
-async def get_schedule(
-    schedule_id: UUID,
-    pool: asyncpg.Pool = Depends(get_pool),
-    user=Depends(get_current_user),
-):
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT * FROM schedules WHERE id = $1", schedule_id
-        )
-    if not row:
+# ── Get one ────────────────────────────────────────────────────────────────
+
+@router.get("/{schedule_id}")
+async def get_schedule(schedule_id: str, db: Client = Depends(get_supabase)):
+    result = (
+        db.table("schedules")
+        .select("*")
+        .eq("id", schedule_id)
+        .single()
+        .execute()
+    )
+    if not result.data:
         raise HTTPException(404, "Schedule not found")
-    return _row_to_dict(row)
+    return result.data
 
 
-@router.post("/", response_model=ScheduleOut, status_code=201)
-async def create_schedule(
-    body: ScheduleCreate,
-    pool: asyncpg.Pool = Depends(get_pool),
-    user=Depends(get_current_user),
-):
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO schedules
-                (phone_id, contact_id, scenario_id, schedule_name, schedule_type,
-                 status, run_at, cron_expr, interval_min)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-            RETURNING *
-            """,
-            body.phone_id,
-            body.contact_id,
-            body.scenario_id,
-            body.schedule_name,
-            body.schedule_type,
-            body.status or "ready",
-            body.run_at,
-            body.cron_expr,
-            body.interval_min,
-        )
-    return _row_to_dict(row)
+# ── Create ─────────────────────────────────────────────────────────────────
+
+@router.post("/", status_code=201)
+async def create_schedule(body: ScheduleCreate, db: Client = Depends(get_supabase)):
+    payload = {
+        "id":            str(uuid.uuid4()),
+        "schedule_type": body.schedule_type,
+        "status":        body.status or "ready",
+    }
+    if body.phone_id:      payload["phone_id"]      = body.phone_id
+    if body.contact_id:    payload["contact_id"]    = body.contact_id
+    if body.scenario_id:   payload["scenario_id"]   = body.scenario_id
+    if body.schedule_name: payload["schedule_name"] = body.schedule_name
+    if body.run_at:        payload["run_at"]         = body.run_at
+    if body.cron_expr:     payload["cron_expr"]      = body.cron_expr
+    if body.interval_min:  payload["interval_min"]   = body.interval_min
+
+    result = db.table("schedules").insert(payload).execute()
+    if not result.data:
+        raise HTTPException(500, "Failed to create schedule")
+    return result.data[0]
 
 
-@router.put("/{schedule_id}", response_model=ScheduleOut)
+# ── Update ─────────────────────────────────────────────────────────────────
+
+@router.put("/{schedule_id}")
 async def update_schedule(
-    schedule_id: UUID,
+    schedule_id: str,
     body: ScheduleUpdate,
-    pool: asyncpg.Pool = Depends(get_pool),
-    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
 ):
-    """Partial update — only non-None fields are written."""
-    updates: dict = {k: v for k, v in body.model_dump().items() if v is not None}
-    if not updates:
+    payload = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not payload:
         raise HTTPException(400, "No fields to update")
 
-    set_clauses = ", ".join(
-        f"{col} = ${i+2}" for i, col in enumerate(updates.keys())
+    result = (
+        db.table("schedules")
+        .update(payload)
+        .eq("id", schedule_id)
+        .execute()
     )
-    values = list(updates.values())
-
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            f"""
-            UPDATE schedules
-            SET {set_clauses}
-            WHERE id = $1
-            RETURNING *
-            """,
-            schedule_id,
-            *values,
-        )
-    if not row:
+    if not result.data:
         raise HTTPException(404, "Schedule not found")
-    return _row_to_dict(row)
+    return result.data[0]
 
+
+# ── Delete ─────────────────────────────────────────────────────────────────
 
 @router.delete("/{schedule_id}", status_code=204)
-async def delete_schedule(
-    schedule_id: UUID,
-    pool: asyncpg.Pool = Depends(get_pool),
-    user=Depends(get_current_user),
-):
-    async with pool.acquire() as conn:
-        result = await conn.execute(
-            "DELETE FROM schedules WHERE id = $1", schedule_id
-        )
-    if result == "DELETE 0":
+async def delete_schedule(schedule_id: str, db: Client = Depends(get_supabase)):
+    db.table("schedules").delete().eq("id", schedule_id).execute()
+
+
+# ── Run now ────────────────────────────────────────────────────────────────
+
+@router.post("/{schedule_id}/run")
+async def run_schedule_now(schedule_id: str, db: Client = Depends(get_supabase)):
+    from datetime import datetime, timezone
+    result = (
+        db.table("schedules")
+        .update({"status": "running", "last_run": datetime.now(timezone.utc).isoformat()})
+        .eq("id", schedule_id)
+        .execute()
+    )
+    if not result.data:
         raise HTTPException(404, "Schedule not found")
-
-
-@router.post("/{schedule_id}/run", response_model=ScheduleOut)
-async def run_schedule_now(
-    schedule_id: UUID,
-    pool: asyncpg.Pool = Depends(get_pool),
-    user=Depends(get_current_user),
-):
-    """Mark schedule as running and set last_run = now."""
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            UPDATE schedules
-            SET status   = 'running',
-                last_run = NOW()
-            WHERE id = $1
-            RETURNING *
-            """,
-            schedule_id,
-        )
-    if not row:
-        raise HTTPException(404, "Schedule not found")
-    return _row_to_dict(row)
-
-
-@router.patch("/{schedule_id}/status", response_model=ScheduleOut)
-async def set_schedule_status(
-    schedule_id: UUID,
-    status: str = Query(..., pattern="^(ready|running|disabled)$"),
-    pool: asyncpg.Pool = Depends(get_pool),
-    user=Depends(get_current_user),
-):
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "UPDATE schedules SET status=$2 WHERE id=$1 RETURNING *",
-            schedule_id, status,
-        )
-    if not row:
-        raise HTTPException(404, "Schedule not found")
-    return _row_to_dict(row)
+    return result.data[0]
