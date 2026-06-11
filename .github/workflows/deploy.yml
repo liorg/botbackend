@@ -29,6 +29,7 @@ jobs:
             set -e
             echo "WHOAMI ="
             whoami
+            git config --global --add safe.directory /opt/fastapi-app
             cd /opt/fastapi-app
             git reset --hard
             git pull origin main
