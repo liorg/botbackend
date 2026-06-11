@@ -117,9 +117,10 @@ async def update_schedule(
 
 # ── Delete ─────────────────────────────────────────────────────────────────
 
-@router.delete("/{schedule_id}", status_code=204)
+@router.delete("/{schedule_id}")
 async def delete_schedule(schedule_id: str, db: Client = Depends(get_supabase)):
     db.table("schedules").delete().eq("id", schedule_id).execute()
+    return {"ok": True}
 
 
 # ── Run now ────────────────────────────────────────────────────────────────
