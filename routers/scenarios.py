@@ -178,7 +178,7 @@ async def update_scenario(
     )
     if not existing.data:
         raise HTTPException(status_code=404, detail="Scenario not found")
-
+    print(f"🔥 event_type received: {body.event_type}")  # ← הוסף
     config = _merge_config(existing.data.get("config") or {}, body)
 
     payload: dict = {"config": config}
@@ -190,7 +190,7 @@ async def update_scenario(
         payload["estimated_duration_minutes"] = body.estimated_duration_minutes
     if body.inter_leaf_response_time is not None:
         payload["inter_leaf_response_time"] = body.inter_leaf_response_time
-
+        
     result = (
         db.table("scenarios")
         .update(payload)
