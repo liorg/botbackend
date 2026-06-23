@@ -29,7 +29,8 @@ BLOCKED_IPS = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
 class ProvisionRequest(BaseModel):
     phone_number: str
     nickname:     Optional[str] = None
-    tag:          Optional[str] = None
+    tag:          Optional[str] = None    
+    use_pairing_code: Optional[bool] = None   # 22
 
 
 def _agent_headers() -> dict:
@@ -230,6 +231,7 @@ async def provision_phone(
                 "tag":         body.tag,
                 "userId":      user["uid"],
                 "isNew":       is_new,
+                "usePairingCode": body.use_pairing_code,   # ← 
             },
             retries=3,
             delay=2.0,
@@ -252,6 +254,8 @@ async def provision_phone(
             "qr_refresh_url":  data.get("qrRefreshUrl"),
             "message":         data.get("message"),
             "host_name":       host["host_name"],
+            "pairing_code":    data.get("pairingCode"),     # ← הוסף
+
         }
 
     except httpx.HTTPStatusError as e:
@@ -282,9 +286,30 @@ async def get_qr_code(phone_id: str, user=Depends(get_current_user), db: Client 
         "qr_image_base64": data.get("qrImageBase64"),
         "qr_code":         data.get("qr"),
         "message":         data.get("message"),
+        "pairing_code":    data.get("pairingCode"),     # ← הוסף
+
     }
 
-
+@router.post("/{phone_id}/pairing-code/refresh")
+async def refresh_pairing_code(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
+    host = await _get_host_for_phone(db, phone_id)
+    if not host:
+        host = await _find_healthy_host(db)
+    if not host:
+        raise HTTPException(status_code=503, detail="No agent available")
+    try:
+        data = await _agent_post(host["ip_address"], f"/api/phones/{phone_id}/pairing-code/refresh", {})
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"Agent error: {e.response.text}")
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail="Agent unreachable")
+    return {
+        "status":       data.get("status"),
+        "pairing_code": data.get("pairingCode"),
+        "message":      data.get("message"),
+        "poll_url":     data.get("pollUrl"),
+    }
+    
 @router.post("/{phone_id}/pause")
 async def pause_phone(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     host = await _get_host_for_phone(db, phone_id)
