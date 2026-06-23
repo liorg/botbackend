@@ -15,7 +15,7 @@ from logging_config import get_logger, logging_middleware
 
 load_dotenv()
 
-version = "1.0.3.2"
+version = "1.0.3.3"
 logger = get_logger("main")
 
 app = FastAPI(title="ScenarioBot API", version=version)
