@@ -45,9 +45,9 @@ async def _agent_get(ip: str, path: str) -> dict:
         return resp.json()
 
 
-async def _agent_post(ip: str, path: str, body: dict) -> dict:
+async def _agent_post(ip: str, path: str, body: dict, timeout: float = None) -> dict:
     url = f"http://{ip}:{AGENT_PORT}{path}"
-    async with httpx.AsyncClient(timeout=AGENT_TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=timeout or AGENT_TIMEOUT) as client:
         resp = await client.post(url, headers=_agent_headers(), json=body)
         resp.raise_for_status()
         return resp.json()
@@ -55,19 +55,19 @@ async def _agent_post(ip: str, path: str, body: dict) -> dict:
 
 async def _agent_post_with_retry(
     ip: str, path: str, body: dict,
-    retries: int = 3, delay: float = 2.0
+    retries: int = 3, delay: float = 2.0, timeout: float = None,
 ) -> dict:
     last_error = None
     for attempt in range(1, retries + 1):
         try:
-            return await _agent_post(ip, path, body)
+            return await _agent_post(ip, path, body, timeout=timeout)
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             last_error = e
             logger.warning(
                 f"[AGENT] Attempt {attempt}/{retries} failed for {ip}{path}: {e}"
             )
             if attempt < retries:
-                await asyncio.sleep(delay * attempt)  # 2s, 4s, 6s
+                await asyncio.sleep(delay * attempt)
     raise last_error
 
 
@@ -235,6 +235,7 @@ async def provision_phone(
             },
             retries=3,
             delay=2.0,
+            timeout=45,
         )
 
         phone_id = data.get("phoneId") or (phone["id"] if phone else None)
@@ -298,7 +299,7 @@ async def refresh_pairing_code(phone_id: str, user=Depends(get_current_user), db
     if not host:
         raise HTTPException(status_code=503, detail="No agent available")
     try:
-        data = await _agent_post(host["ip_address"], f"/api/phones/{phone_id}/pairing-code/refresh", {})
+        data = await _agent_post(host["ip_address"], f"/api/phones/{phone_id}/pairing-code/refresh", {}, timeout=45)
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=502, detail=f"Agent error: {e.response.text}")
     except httpx.RequestError:
