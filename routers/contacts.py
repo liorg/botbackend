@@ -220,6 +220,8 @@ async def get_contact_messages(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── replace the whole `list_contacts` function in routers/contacts.py with this ──
+
 @router.get("/contacts")
 async def list_contacts(
     phone_id: str,
@@ -235,50 +237,54 @@ async def list_contacts(
             .execute()
         )
         contacts = result.data or []
+        if not contacts:
+            return {"contacts": []}
+
+        # ── שליפה אחת לכל ההודעות של כל ה-contacts (במקום query בלופ) ──────
+        all_ids = [c["id"] for c in contacts]
+        msgs_res = (
+            db.table("messages")
+            .select("id, contact_id, content, direction, sent_at, sender")
+            .in_("contact_id", all_ids)
+            .order("sent_at", desc=True)
+            .execute()
+        )
+
+        # ── group בזיכרון: ההודעה הראשונה שפוגשים לכל contact_id היא האחרונה
+        #    (כי השליפה ממוינת desc) ──────────────────────────────────────────
+        last_by_contact = {}
+        for m in (msgs_res.data or []):
+            cid = m.get("contact_id")
+            if cid and cid not in last_by_contact:
+                last_by_contact[cid] = m
 
         for contact in contacts:
-            try:
-                own_msgs = (
-                    db.table("messages")
-                    .select("id, content, direction, sent_at, sender")
-                    .eq("contact_id", contact["id"])
-                    .order("sent_at", desc=True)
-                    .limit(1)
-                    .execute()
-                )
-                last = own_msgs.data[0] if own_msgs.data else None
+            last = last_by_contact.get(contact["id"])
 
-                if contact.get("tag") == "active" and contact.get("lid"):
-                    contact_lid = contact.get("lid")
-                    draft_ids = [
-                        c["id"] for c in contacts
-                        if c.get("tag") == "draft" and (
-                            c.get("parent_contact_id") == contact["id"] or
-                            c.get("number") == contact_lid
-                        )
-                    ]
-                    if draft_ids:
-                        draft_msgs = (
-                            db.table("messages")
-                            .select("id, content, direction, sent_at, sender")
-                            .in_("contact_id", draft_ids)
-                            .order("sent_at", desc=True)
-                            .limit(1)
-                            .execute()
-                        )
-                        draft_last = draft_msgs.data[0] if draft_msgs.data else None
-                        if draft_last and (not last or draft_last["sent_at"] > last["sent_at"]):
-                            last = draft_last
+            # ── מיזוג last_message מה-drafts המקושרים ל-active contact ──────
+            if contact.get("tag") == "active" and contact.get("lid"):
+                contact_lid = contact.get("lid")
+                draft_ids = [
+                    c["id"] for c in contacts
+                    if c.get("tag") == "draft" and (
+                        c.get("parent_contact_id") == contact["id"] or
+                        c.get("number") == contact_lid
+                    )
+                ]
+                draft_candidates = [
+                    last_by_contact[d_id] for d_id in draft_ids if d_id in last_by_contact
+                ]
+                if draft_candidates:
+                    draft_last = max(draft_candidates, key=lambda m: m["sent_at"])
+                    if not last or draft_last["sent_at"] > last["sent_at"]:
+                        last = draft_last
 
-                contact["last_message"] = last
-            except Exception:
-                contact["last_message"] = None
+            contact["last_message"] = last
 
         return {"contacts": contacts}
     except Exception as e:
         logger.error(f"Error listing contacts: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.post("/contacts")
 async def create_contact(
