@@ -222,6 +222,8 @@ async def get_contact_messages(
 
 # ── replace the whole `list_contacts` function in routers/contacts.py with this ──
 
+# routers/contacts.py — החלף רק את list_contacts
+
 @router.get("/contacts")
 async def list_contacts(
     phone_id: str,
@@ -231,57 +233,12 @@ async def list_contacts(
     try:
         result = (
             db.table("contacts")
-            .select("*")
+            .select("id, phone_id, number, name, whatsapp_name, tag, lid, is_connect, parent_contact_id, created_at, updated_at")
             .eq("phone_id", phone_id)
-            .order("created_at", desc=True)
+            .order("updated_at", desc=True)
             .execute()
         )
-        contacts = result.data or []
-        if not contacts:
-            return {"contacts": []}
-
-        # ── שליפה אחת לכל ההודעות של כל ה-contacts (במקום query בלופ) ──────
-        all_ids = [c["id"] for c in contacts]
-        msgs_res = (
-            db.table("messages")
-            .select("id, contact_id, content, direction, sent_at, sender")
-            .in_("contact_id", all_ids)
-            .order("sent_at", desc=True)
-            .execute()
-        )
-
-        # ── group בזיכרון: ההודעה הראשונה שפוגשים לכל contact_id היא האחרונה
-        #    (כי השליפה ממוינת desc) ──────────────────────────────────────────
-        last_by_contact = {}
-        for m in (msgs_res.data or []):
-            cid = m.get("contact_id")
-            if cid and cid not in last_by_contact:
-                last_by_contact[cid] = m
-
-        for contact in contacts:
-            last = last_by_contact.get(contact["id"])
-
-            # ── מיזוג last_message מה-drafts המקושרים ל-active contact ──────
-            if contact.get("tag") == "active" and contact.get("lid"):
-                contact_lid = contact.get("lid")
-                draft_ids = [
-                    c["id"] for c in contacts
-                    if c.get("tag") == "draft" and (
-                        c.get("parent_contact_id") == contact["id"] or
-                        c.get("number") == contact_lid
-                    )
-                ]
-                draft_candidates = [
-                    last_by_contact[d_id] for d_id in draft_ids if d_id in last_by_contact
-                ]
-                if draft_candidates:
-                    draft_last = max(draft_candidates, key=lambda m: m["sent_at"])
-                    if not last or draft_last["sent_at"] > last["sent_at"]:
-                        last = draft_last
-
-            contact["last_message"] = last
-
-        return {"contacts": contacts}
+        return {"contacts": result.data or []}
     except Exception as e:
         logger.error(f"Error listing contacts: {e}")
         raise HTTPException(status_code=500, detail=str(e))

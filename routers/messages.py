@@ -247,3 +247,42 @@ async def proxy_media(
         raise
     except Exception as e:
         raise HTTPException(503, f"Agent unavailable: {e}")
+
+@router.get("/phone/{phone_id}/last")
+async def get_last_messages_for_phone(
+    phone_id: str,
+    db: Client = Depends(get_supabase),
+):
+    """
+    מחזיר הודעה אחרונה לכל contact של phone_id.
+    קריאה אחת בלבד — בלי N+1.
+    { contact_id: { id, content, direction, sent_at, sender } }
+    """
+    # שלוף את כל contact ids של ה-phone
+    contacts_res = (
+        db.table("contacts")
+        .select("id")
+        .eq("phone_id", phone_id)
+        .execute()
+    )
+    contact_ids = [c["id"] for c in (contacts_res.data or [])]
+    if not contact_ids:
+        return {}
+
+    # שליפה אחת — כל ההודעות של כל ה-contacts, ממוינות desc
+    msgs_res = (
+        db.table("messages")
+        .select("id, contact_id, content, direction, sent_at, sender")
+        .in_("contact_id", contact_ids)
+        .order("sent_at", desc=True)
+        .execute()
+    )
+
+    # שמור רק ראשון (= אחרון) לכל contact_id
+    last: dict = {}
+    for m in (msgs_res.data or []):
+        cid = m.get("contact_id")
+        if cid and cid not in last:
+            last[cid] = m
+
+    return last
