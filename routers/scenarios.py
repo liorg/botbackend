@@ -18,7 +18,6 @@ class ScenarioCreate(BaseModel):
     config: Optional[dict] = {}
     estimated_duration_minutes: Optional[str] = None
     inter_leaf_response_time: Optional[str] = None
-    # ── Designer fields ────────────────────────────────────────────────────
     canvas: Optional[list[dict[str, Any]]] = None
     arrow_data: Optional[dict[str, Any]] = None
     interval: Optional[dict[str, Any]] = None
@@ -26,7 +25,8 @@ class ScenarioCreate(BaseModel):
     use_auto_calc: Optional[bool] = True
     description: Optional[str] = None
     bot_contact: Optional[dict[str, Any]] = None
-    event_type: Optional[Literal["trigger", "scheduler"]] = "scheduler"   # ← default: scheduler
+    event_type: Optional[Literal["trigger", "scheduler"]] = "scheduler"
+    priority: Optional[int] = 15
 
 
 class ScenarioUpdate(BaseModel):
@@ -36,7 +36,6 @@ class ScenarioUpdate(BaseModel):
     config: Optional[dict] = None
     estimated_duration_minutes: Optional[str] = None
     inter_leaf_response_time: Optional[str] = None
-    # ── Designer fields ────────────────────────────────────────────────────
     canvas: Optional[list[dict[str, Any]]] = None
     arrow_data: Optional[dict[str, Any]] = None
     interval: Optional[dict[str, Any]] = None
@@ -45,6 +44,7 @@ class ScenarioUpdate(BaseModel):
     description: Optional[str] = None
     bot_contact: Optional[dict[str, Any]] = None
     event_type: Optional[Literal["trigger", "scheduler"]] = None
+    priority: Optional[int] = None
 
 
 def _merge_config(existing_config: dict, body) -> dict:
@@ -70,9 +70,16 @@ def _expand_config(row: dict) -> dict:
     row["use_auto_calc"]  = cfg.get("use_auto_calc", True)
     row["description"]    = cfg.get("description", "")
     row["bot_contact"]    = cfg.get("bot_contact")
-    # event_type — קרא מעמודה נפרדת, fallback ל-config לתאימות אחורה
     row["event_type"]     = row.get("event_type") or cfg.get("event_type", "scheduler")
+    row["priority"]       = row.get("priority") if row.get("priority") is not None else 15  # ← תוקן: Python, לא JS
     return row
+
+
+_SELECT = (
+    "id, phone_id, contact_id, name, status, config, event_type, priority, "  # ← priority בselect
+    "created_at, estimated_duration_minutes, inter_leaf_response_time, "
+    "contacts(id, name, number, avatar, is_bot)"
+)
 
 
 # ── List scenarios ─────────────────────────────────────────────────────────
@@ -80,11 +87,7 @@ def _expand_config(row: dict) -> dict:
 async def list_scenarios(phone_id: str, db: Client = Depends(get_supabase)):
     result = (
         db.table("scenarios")
-        .select(
-            "id, phone_id, contact_id, name, status, config, event_type, "
-            "created_at, estimated_duration_minutes, inter_leaf_response_time, "
-            "contacts(id, name, number, avatar, is_bot)"
-        )
+        .select(_SELECT)
         .eq("phone_id", phone_id)
         .order("created_at", desc=True)
         .execute()
@@ -101,11 +104,7 @@ async def list_scenarios_by_type(
 ):
     result = (
         db.table("scenarios")
-        .select(
-            "id, phone_id, contact_id, name, status, config, event_type, "
-            "created_at, estimated_duration_minutes, inter_leaf_response_time, "
-            "contacts(id, name, number, avatar, is_bot)"
-        )
+        .select(_SELECT)
         .eq("phone_id", phone_id)
         .eq("event_type", event_type)
         .eq("status", "active")
@@ -122,11 +121,7 @@ async def get_scenario(
 ):
     result = (
         db.table("scenarios")
-        .select(
-            "id, phone_id, contact_id, name, status, config, event_type, "
-            "created_at, estimated_duration_minutes, inter_leaf_response_time, "
-            "contacts(id, name, number, avatar, is_bot)"
-        )
+        .select(_SELECT)
         .eq("id", scenario_id)
         .eq("phone_id", phone_id)
         .single()
@@ -151,6 +146,7 @@ async def create_scenario(
         "status":     body.status or "draft",
         "config":     config,
         "event_type": body.event_type or "scheduler",
+        "priority":   body.priority if body.priority is not None else 15,
     }
     if body.contact_id:                 payload["contact_id"]                 = body.contact_id
     if body.estimated_duration_minutes: payload["estimated_duration_minutes"] = body.estimated_duration_minutes
@@ -168,8 +164,6 @@ async def update_scenario(
     phone_id: str, scenario_id: str, body: ScenarioUpdate,
     db: Client = Depends(get_supabase)
 ):
-    print(f"🔥 body.event_type: {body.event_type}")
-    print(f"🔥 payload will include: {body.dict()}")
     existing = (
         db.table("scenarios")
         .select("config")
@@ -188,11 +182,12 @@ async def update_scenario(
     if body.status     is not None: payload["status"]     = body.status
     if body.contact_id is not None: payload["contact_id"] = body.contact_id
     if body.event_type is not None: payload["event_type"] = body.event_type
+    if body.priority   is not None: payload["priority"]   = body.priority
     if body.estimated_duration_minutes is not None:
         payload["estimated_duration_minutes"] = body.estimated_duration_minutes
     if body.inter_leaf_response_time is not None:
         payload["inter_leaf_response_time"] = body.inter_leaf_response_time
-        
+
     result = (
         db.table("scenarios")
         .update(payload)
