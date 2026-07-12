@@ -224,6 +224,8 @@ async def get_contact_messages(
 
 # routers/contacts.py — החלף רק את list_contacts
 
+# routers/contacts.py — החלף רק את list_contacts
+
 @router.get("/contacts")
 async def list_contacts(
     phone_id: str,
