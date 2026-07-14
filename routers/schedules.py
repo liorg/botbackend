@@ -16,6 +16,7 @@ from supabase import Client
 
 from dependencies import get_supabase
 
+from services.scheduler import compute_next_run
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
 RECURRING = {"hourly", "daily", "weekly", "monthly"}
@@ -46,30 +47,6 @@ class ScheduleUpdate(BaseModel):
     cron_expr:     Optional[str] = None
     interval_min:  Optional[int] = None
     next_run:      Optional[str] = None
-
-
-# ── חישוב next_run ─────────────────────────────────────────────────────────
-
-def compute_next_run(db: Client, schedule_type: str, cron_expr: Optional[str],
-                     run_at: Optional[str] = None) -> Optional[str]:
-    """
-    'once'  → run_at כמו שהוא.
-    חוזר    → spine_compute_next_run מפרש את ה-cron_expr.
-    """
-    if schedule_type == "once":
-        return run_at
-
-    if schedule_type not in RECURRING or not cron_expr:
-        return None
-
-    try:
-        return db.rpc("spine_compute_next_run", {
-            "p_type": schedule_type,
-            "p_cron": cron_expr,
-        }).execute().data
-    except Exception:
-        # לא לחסום שמירה בגלל cron פגום — התזמון פשוט לא יורה עד שיתוקן.
-        return None
 
 
 # ── List ───────────────────────────────────────────────────────────────────
