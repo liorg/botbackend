@@ -1,123 +1,102 @@
-import json
-from calendar import monthrange
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from apscheduler.triggers.cron import CronTrigger
 
 
-def _pg_day_to_python(day: int) -> int:
-    # PostgreSQL: 0=Sunday
-    # Python:     0=Monday
-    return (day - 1) % 7
+DEFAULT_TIMEZONE = "Asia/Jerusalem"
 
 
 def compute_next_run(
     schedule_type: str,
     cron_expr: Optional[str],
     run_at: Optional[str] = None,
+    timezone_name: Optional[str] = None,
 ) -> Optional[str]:
+    """
+    מחשב את זמן ההפעלה הבא.
 
-    if schedule_type == "once":
-        return run_at
+    schedule_type:
+        once — תזמון חד-פעמי לפי run_at.
+        cron — תזמון חוזר לפי cron_expr.
 
-    if not cron_expr:
+    cron_expr הוא ביטוי Cron אמיתי בן חמישה שדות:
+
+        minute hour day month day_of_week
+
+    דוגמאות:
+        30 20 * * *      — כל יום ב-20:30
+        30 19 * * 0,3    — ראשון ורביעי ב-19:30
+        15 */2 * * *     — כל שעתיים בדקה 15
+        0 10 15 * *      — בכל 15 לחודש ב-10:00
+
+    החישוב מתבצע באזור הזמן של המשתמש.
+    התוצאה מוחזרת ב-UTC לשמירה בעמודת timestamptz.
+    """
+
+    normalized_type = (schedule_type or "").strip().lower()
+
+    # תזמון חד-פעמי: בזמן יצירת התזמון next_run_at שווה ל-run_at.
+    if normalized_type == "once":
+        return normalize_run_at(run_at)
+
+    if normalized_type != "cron":
+        return None
+
+    if not cron_expr or not cron_expr.strip():
         return None
 
     try:
-        cfg = json.loads(cron_expr)
-    except Exception:
-        return None
+        user_timezone = ZoneInfo(
+            timezone_name or DEFAULT_TIMEZONE
+        )
+    except ZoneInfoNotFoundError:
+        user_timezone = ZoneInfo(DEFAULT_TIMEZONE)
 
-    now = datetime.now(timezone.utc)
-
-    hour = int(cfg.get("hour", 9))
-    minute = int(cfg.get("minute", 0))
-
-    if schedule_type == "hourly":
-        interval = max(int(cfg.get("intervalHours", 1)), 1)
-
-        next_run = now.replace(
-            hour=hour,
-            minute=minute,
-            second=0,
-            microsecond=0,
+    try:
+        trigger = CronTrigger.from_crontab(
+            cron_expr.strip(),
+            timezone=user_timezone,
         )
 
-        while next_run <= now:
-            next_run += timedelta(hours=interval)
+        now_utc = datetime.now(timezone.utc)
+        now_local = now_utc.astimezone(user_timezone)
 
-        return next_run.isoformat()
-
-    if schedule_type == "daily":
-        next_run = now.replace(
-            hour=hour,
-            minute=minute,
-            second=0,
-            microsecond=0,
+        next_run = trigger.get_next_fire_time(
+            previous_fire_time=None,
+            now=now_local,
         )
 
-        if next_run <= now:
-            next_run += timedelta(days=1)
-
-        return next_run.isoformat()
-
-    if schedule_type == "weekly":
-
-        days = cfg.get("days", [])
-
-        if not days:
+        if next_run is None:
             return None
 
-        wanted = {_pg_day_to_python(int(x)) for x in days}
+        return next_run.astimezone(timezone.utc).isoformat()
 
-        for i in range(8):
-
-            candidate = (
-                now.replace(
-                    hour=hour,
-                    minute=minute,
-                    second=0,
-                    microsecond=0,
-                )
-                + timedelta(days=i)
-            )
-
-            if candidate <= now:
-                continue
-
-            if candidate.weekday() in wanted:
-                return candidate.isoformat()
-
+    except (TypeError, ValueError):
+        # ביטוי Cron לא תקין.
         return None
 
-    if schedule_type == "monthly":
 
-        wanted_day = int(cfg.get("dayOfMonth", 1))
+def normalize_run_at(run_at: Optional[str]) -> Optional[str]:
+    """
+    בודק ומנרמל זמן חד-פעמי ל-UTC.
 
-        year = now.year
-        month = now.month
+    אם run_at ללא timezone, הוא נחשב UTC.
+    """
 
-        for _ in range(2):
-
-            day = min(wanted_day, monthrange(year, month)[1])
-
-            candidate = datetime(
-                year,
-                month,
-                day,
-                hour,
-                minute,
-                tzinfo=timezone.utc,
-            )
-
-            if candidate > now:
-                return candidate.isoformat()
-
-            if month == 12:
-                year += 1
-                month = 1
-            else:
-                month += 1
-
+    if not run_at:
         return None
 
-    return None
+    try:
+        value = datetime.fromisoformat(
+            run_at.replace("Z", "+00:00")
+        )
+
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+
+        return value.astimezone(timezone.utc).isoformat()
+
+    except (TypeError, ValueError):
+        return None
