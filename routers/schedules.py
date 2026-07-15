@@ -1,9 +1,17 @@
 # routers/schedules.py
 """
-CRUD לתזמונים.
+CRUD לתזמונים — מיושר מול ה-Scheduler העצמאי.
 
-next_run מחושב בכל create/update/run.
-בלעדיו הוא נשאר NULL, וה-scheduler לא ימצא תזמונים להרצה.
+חוזה משותף (חובה שיהיה זהה בשני הצדדים):
+
+    עמודה        next_run_at   (לא next_run!)
+    סטטוסים      active / paused / firing / completed / error
+    schedule_type once / cron
+    cron_expr    ביטוי Linux cron אמיתי ("30 20 * * 0,3")
+
+next_run_at מחושב בכל create/update/run.
+בלעדיו הוא נשאר NULL, וה-Scheduler (שמסנן lte("next_run_at", now))
+לא ימצא את התזמון לעולם.
 """
 
 from datetime import datetime, timezone
@@ -15,10 +23,35 @@ from pydantic import BaseModel
 from supabase import Client
 
 from dependencies import get_supabase
-from services.scheduler import compute_next_run
+from services.scheduler import compute_next_run, validate_cron
 
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
+
+# עמודות מפורשות — בלי select("*").
+# עמודה חדשה ב-DB לא זולגת ל-API עד שמוסיפים אותה כאן במודע.
+SCHEDULE_COLUMNS = (
+    "id,"
+    "user_id,"
+    "phone_id,"
+    "contact_id,"
+    "scenario_id,"
+    "schedule_name,"
+    "schedule_type,"
+    "cron_expr,"
+    "run_at,"
+    "next_run_at,"
+    "last_run_at,"
+    "priority,"
+    "status,"
+    "created_at,"
+    "updated_at,"
+    "scenarios(name)"
+)
+
+VALID_TYPES    = {"once", "cron"}
+# סטטוסים שהלקוח רשאי לקבוע. firing מנוהל ע"י ה-Scheduler בלבד.
+CLIENT_STATUSES = {"active", "paused"}
 
 
 # ── Schemas ────────────────────────────────────────────────────────────────
@@ -28,11 +61,11 @@ class ScheduleCreate(BaseModel):
     contact_id: Optional[str] = None
     scenario_id: Optional[str] = None
     schedule_name: Optional[str] = None
-    schedule_type: str
-    status: Optional[str] = "ready"
-    run_at: Optional[str] = None
-    cron_expr: Optional[str] = None
-    interval_min: Optional[int] = None
+    schedule_type: str                      # once | cron
+    status: Optional[str] = "active"
+    run_at: Optional[str] = None            # ל-once
+    cron_expr: Optional[str] = None         # Linux cron ל-cron
+    priority: Optional[int] = None
 
 
 class ScheduleUpdate(BaseModel):
@@ -44,8 +77,23 @@ class ScheduleUpdate(BaseModel):
     status: Optional[str] = None
     run_at: Optional[str] = None
     cron_expr: Optional[str] = None
-    interval_min: Optional[int] = None
-    next_run: Optional[str] = None
+    priority: Optional[int] = None
+
+
+# ── Validation helpers ─────────────────────────────────────────────────────
+
+def _validate_timing(schedule_type: str, cron_expr: Optional[str], run_at: Optional[str]) -> None:
+    if schedule_type not in VALID_TYPES:
+        raise HTTPException(400, f"schedule_type must be one of {sorted(VALID_TYPES)}")
+
+    if schedule_type == "cron":
+        if not cron_expr or not cron_expr.strip():
+            raise HTTPException(400, "cron_expr is required for schedule_type=cron")
+        if not validate_cron(cron_expr):
+            raise HTTPException(400, f"Invalid cron expression: '{cron_expr}'")
+
+    if schedule_type == "once" and not run_at:
+        raise HTTPException(400, "run_at is required for schedule_type=once")
 
 
 # ── List ───────────────────────────────────────────────────────────────────
@@ -58,7 +106,7 @@ async def list_schedules(
 ):
     query = (
         db.table("schedules")
-        .select("*")
+        .select(SCHEDULE_COLUMNS)
         .order("created_at", desc=True)
     )
 
@@ -80,7 +128,7 @@ async def get_schedule(
 ):
     result = (
         db.table("schedules")
-        .select("*")
+        .select(SCHEDULE_COLUMNS)
         .eq("id", schedule_id)
         .maybe_single()
         .execute()
@@ -93,7 +141,7 @@ async def get_schedule(
     return result
 
 
-# ── Calls ──────────────────────────────────────────────────────────────────
+# ── Calls (לוג אירועים) ────────────────────────────────────────────────────
 
 @router.get("/{schedule_id}/calls")
 async def schedule_calls(
@@ -119,10 +167,16 @@ async def create_schedule(
     body: ScheduleCreate,
     db: Client = Depends(get_supabase),
 ):
+    _validate_timing(body.schedule_type, body.cron_expr, body.run_at)
+
+    status = body.status or "active"
+    if status not in CLIENT_STATUSES:
+        raise HTTPException(400, f"status must be one of {sorted(CLIENT_STATUSES)}")
+
     payload = {
         "id": str(uuid.uuid4()),
         "schedule_type": body.schedule_type,
-        "status": body.status or "ready",
+        "status": status,
     }
 
     for field in (
@@ -132,18 +186,22 @@ async def create_schedule(
         "schedule_name",
         "run_at",
         "cron_expr",
-        "interval_min",
+        "priority",
     ):
         value = getattr(body, field)
-
         if value is not None:
             payload[field] = value
 
-    payload["next_run"] = compute_next_run(
+    next_run_at = compute_next_run(
         body.schedule_type,
         body.cron_expr,
         body.run_at,
     )
+
+    if next_run_at is None:
+        raise HTTPException(400, "Could not compute next_run_at — check cron_expr/run_at")
+
+    payload["next_run_at"] = next_run_at
 
     result = (
         db.table("schedules")
@@ -174,10 +232,13 @@ async def update_schedule(
     if not payload:
         raise HTTPException(400, "No fields to update")
 
+    if "status" in payload and payload["status"] not in CLIENT_STATUSES:
+        raise HTTPException(400, f"status must be one of {sorted(CLIENT_STATUSES)}")
+
     timing_fields = {"schedule_type", "cron_expr", "run_at"}
     touches_timing = any(field in payload for field in timing_fields)
 
-    if touches_timing and "next_run" not in payload:
+    if touches_timing:
         current = (
             db.table("schedules")
             .select("schedule_type, cron_expr, run_at")
@@ -190,26 +251,20 @@ async def update_schedule(
         if not current:
             raise HTTPException(404, "Schedule not found")
 
-        schedule_type = payload.get(
-            "schedule_type",
-            current.get("schedule_type"),
-        )
+        schedule_type = payload.get("schedule_type", current.get("schedule_type"))
+        cron_expr     = payload.get("cron_expr",     current.get("cron_expr"))
+        run_at        = payload.get("run_at",        current.get("run_at"))
 
-        cron_expr = payload.get(
-            "cron_expr",
-            current.get("cron_expr"),
-        )
+        _validate_timing(schedule_type, cron_expr, run_at)
 
-        run_at = payload.get(
-            "run_at",
-            current.get("run_at"),
-        )
+        next_run_at = compute_next_run(schedule_type, cron_expr, run_at)
 
-        payload["next_run"] = compute_next_run(
-            schedule_type,
-            cron_expr,
-            run_at,
-        )
+        if next_run_at is None:
+            raise HTTPException(400, "Could not compute next_run_at — check cron_expr/run_at")
+
+        payload["next_run_at"] = next_run_at
+
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     result = (
         db.table("schedules")
@@ -251,9 +306,18 @@ async def run_schedule_now(
     schedule_id: str,
     db: Client = Depends(get_supabase),
 ):
+    """
+    הרצה ידית: next_run_at=now + status=active.
+
+    לא נוגעים ב-status='firing' — זה שייך ל-Scheduler בלבד.
+    ה-Scheduler שולף status='active' עם next_run_at<=now בסבב הבא (≤30ש'),
+    יורה לכל אנשי הקשר עם tag='active', ומחשב לבד את ה-next_run_at הבא.
+    """
+
+    # רק מה שהבדיקות צריכות — לא מושכים את כל השורה
     schedule = (
         db.table("schedules")
-        .select("*")
+        .select("id, status, phone_id, scenario_id")
         .eq("id", schedule_id)
         .maybe_single()
         .execute()
@@ -263,22 +327,21 @@ async def run_schedule_now(
     if not schedule:
         raise HTTPException(404, "Schedule not found")
 
-    if not (
-        schedule.get("scenario_id")
-        and schedule.get("contact_id")
-        and schedule.get("phone_id")
-    ):
-        raise HTTPException(
-            400,
-            "Schedule is missing phone/contact/scenario",
-        )
+    if schedule.get("status") == "firing":
+        raise HTTPException(409, "Schedule is currently firing")
+
+    if not (schedule.get("scenario_id") and schedule.get("phone_id")):
+        raise HTTPException(400, "Schedule is missing phone/scenario")
+
+    now = datetime.now(timezone.utc).isoformat()
 
     result = (
         db.table("schedules")
         .update(
             {
-                "status": "running",
-                "next_run": datetime.now(timezone.utc).isoformat(),
+                "status": "active",
+                "next_run_at": now,
+                "updated_at": now,
             }
         )
         .eq("id", schedule_id)
