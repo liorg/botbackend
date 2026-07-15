@@ -42,7 +42,6 @@ SCHEDULE_COLUMNS = (
     "run_at,"
     "next_run,"
     "last_run,"
-    "priority,"
     "status,"
     "created_at,"
     "updated_at,"
@@ -65,7 +64,6 @@ class ScheduleCreate(BaseModel):
     status: Optional[str] = "active"
     run_at: Optional[str] = None            # ל-once
     cron_expr: Optional[str] = None         # Linux cron ל-cron
-    priority: Optional[int] = None
 
 
 class ScheduleUpdate(BaseModel):
@@ -77,7 +75,6 @@ class ScheduleUpdate(BaseModel):
     status: Optional[str] = None
     run_at: Optional[str] = None
     cron_expr: Optional[str] = None
-    priority: Optional[int] = None
 
 
 # ── Validation helpers ─────────────────────────────────────────────────────
@@ -210,7 +207,6 @@ async def create_schedule(
         "schedule_name",
         "run_at",
         "cron_expr",
-        "priority",
     ):
         value = getattr(body, field)
         if value is not None:
