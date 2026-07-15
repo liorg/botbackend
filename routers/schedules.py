@@ -4,13 +4,13 @@ CRUD לתזמונים — מיושר מול ה-Scheduler העצמאי.
 
 חוזה משותף (חובה שיהיה זהה בשני הצדדים):
 
-    עמודה        next_run_at   (לא next_run!)
+    עמודות       next_run / last_run   (שמות הסכמה הקיימת — לא משנים סכמה)
     סטטוסים      active / paused / firing / completed / error
     schedule_type once / cron
     cron_expr    ביטוי Linux cron אמיתי ("30 20 * * 0,3")
 
-next_run_at מחושב בכל create/update/run.
-בלעדיו הוא נשאר NULL, וה-Scheduler (שמסנן lte("next_run_at", now))
+next_run מחושב בכל create/update/run.
+בלעדיו הוא נשאר NULL, וה-Scheduler (שמסנן lte("next_run", now))
 לא ימצא את התזמון לעולם.
 """
 
@@ -40,8 +40,8 @@ SCHEDULE_COLUMNS = (
     "schedule_type,"
     "cron_expr,"
     "run_at,"
-    "next_run_at,"
-    "last_run_at,"
+    "next_run,"
+    "last_run,"
     "priority,"
     "status,"
     "created_at,"
@@ -88,7 +88,7 @@ def _resolve_next_run(
     run_at: Optional[str],
 ) -> str:
     """
-    ולידציה + חישוב next_run_at בפעולה אחת.
+    ולידציה + חישוב next_run בפעולה אחת.
 
     compute_next_run מחזיר None על ביטוי Cron לא תקין או run_at לא תקין,
     כך שאין צורך בפונקציית ולידציה נפרדת — None כאן הוא תמיד שגיאת קלט.
@@ -103,9 +103,9 @@ def _resolve_next_run(
     if schedule_type == "once" and not run_at:
         raise HTTPException(400, "run_at is required for schedule_type=once")
 
-    next_run_at = compute_next_run(schedule_type, cron_expr, run_at)
+    next_run = compute_next_run(schedule_type, cron_expr, run_at)
 
-    if next_run_at is None:
+    if next_run is None:
         detail = (
             f"Invalid cron expression: '{cron_expr}'"
             if schedule_type == "cron"
@@ -113,7 +113,7 @@ def _resolve_next_run(
         )
         raise HTTPException(400, detail)
 
-    return next_run_at
+    return next_run
 
 
 # ── List ───────────────────────────────────────────────────────────────────
@@ -187,7 +187,7 @@ async def create_schedule(
     body: ScheduleCreate,
     db: Client = Depends(get_supabase),
 ):
-    next_run_at = _resolve_next_run(
+    next_run = _resolve_next_run(
         body.schedule_type,
         body.cron_expr,
         body.run_at,
@@ -216,7 +216,7 @@ async def create_schedule(
         if value is not None:
             payload[field] = value
 
-    payload["next_run_at"] = next_run_at
+    payload["next_run"] = next_run
 
     result = (
         db.table("schedules")
@@ -270,7 +270,7 @@ async def update_schedule(
         cron_expr     = payload.get("cron_expr",     current.get("cron_expr"))
         run_at        = payload.get("run_at",        current.get("run_at"))
 
-        payload["next_run_at"] = _resolve_next_run(schedule_type, cron_expr, run_at)
+        payload["next_run"] = _resolve_next_run(schedule_type, cron_expr, run_at)
 
     payload["updated_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -315,11 +315,11 @@ async def run_schedule_now(
     db: Client = Depends(get_supabase),
 ):
     """
-    הרצה ידית: next_run_at=now + status=active.
+    הרצה ידית: next_run=now + status=active.
 
     לא נוגעים ב-status='firing' — זה שייך ל-Scheduler בלבד.
-    ה-Scheduler שולף status='active' עם next_run_at<=now בסבב הבא (≤30ש'),
-    יורה לכל אנשי הקשר עם tag='active', ומחשב לבד את ה-next_run_at הבא.
+    ה-Scheduler שולף status='active' עם next_run<=now בסבב הבא (≤30ש'),
+    יורה לכל אנשי הקשר עם tag='active', ומחשב לבד את ה-next_run הבא.
     """
 
     # רק מה שהבדיקות צריכות — לא מושכים את כל השורה
@@ -348,7 +348,7 @@ async def run_schedule_now(
         .update(
             {
                 "status": "active",
-                "next_run_at": now,
+                "next_run": now,
                 "updated_at": now,
             }
         )
