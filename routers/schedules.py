@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from supabase import Client
 
 from dependencies import get_supabase
-from services.scheduler import compute_next_run, validate_cron
+from services.scheduler import compute_next_run
 
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
@@ -82,18 +82,38 @@ class ScheduleUpdate(BaseModel):
 
 # ── Validation helpers ─────────────────────────────────────────────────────
 
-def _validate_timing(schedule_type: str, cron_expr: Optional[str], run_at: Optional[str]) -> None:
+def _resolve_next_run(
+    schedule_type: str,
+    cron_expr: Optional[str],
+    run_at: Optional[str],
+) -> str:
+    """
+    ולידציה + חישוב next_run_at בפעולה אחת.
+
+    compute_next_run מחזיר None על ביטוי Cron לא תקין או run_at לא תקין,
+    כך שאין צורך בפונקציית ולידציה נפרדת — None כאן הוא תמיד שגיאת קלט.
+    """
+
     if schedule_type not in VALID_TYPES:
         raise HTTPException(400, f"schedule_type must be one of {sorted(VALID_TYPES)}")
 
-    if schedule_type == "cron":
-        if not cron_expr or not cron_expr.strip():
-            raise HTTPException(400, "cron_expr is required for schedule_type=cron")
-        if not validate_cron(cron_expr):
-            raise HTTPException(400, f"Invalid cron expression: '{cron_expr}'")
+    if schedule_type == "cron" and not (cron_expr and cron_expr.strip()):
+        raise HTTPException(400, "cron_expr is required for schedule_type=cron")
 
     if schedule_type == "once" and not run_at:
         raise HTTPException(400, "run_at is required for schedule_type=once")
+
+    next_run_at = compute_next_run(schedule_type, cron_expr, run_at)
+
+    if next_run_at is None:
+        detail = (
+            f"Invalid cron expression: '{cron_expr}'"
+            if schedule_type == "cron"
+            else f"Invalid run_at: '{run_at}'"
+        )
+        raise HTTPException(400, detail)
+
+    return next_run_at
 
 
 # ── List ───────────────────────────────────────────────────────────────────
@@ -167,7 +187,11 @@ async def create_schedule(
     body: ScheduleCreate,
     db: Client = Depends(get_supabase),
 ):
-    _validate_timing(body.schedule_type, body.cron_expr, body.run_at)
+    next_run_at = _resolve_next_run(
+        body.schedule_type,
+        body.cron_expr,
+        body.run_at,
+    )
 
     status = body.status or "active"
     if status not in CLIENT_STATUSES:
@@ -191,15 +215,6 @@ async def create_schedule(
         value = getattr(body, field)
         if value is not None:
             payload[field] = value
-
-    next_run_at = compute_next_run(
-        body.schedule_type,
-        body.cron_expr,
-        body.run_at,
-    )
-
-    if next_run_at is None:
-        raise HTTPException(400, "Could not compute next_run_at — check cron_expr/run_at")
 
     payload["next_run_at"] = next_run_at
 
@@ -255,14 +270,7 @@ async def update_schedule(
         cron_expr     = payload.get("cron_expr",     current.get("cron_expr"))
         run_at        = payload.get("run_at",        current.get("run_at"))
 
-        _validate_timing(schedule_type, cron_expr, run_at)
-
-        next_run_at = compute_next_run(schedule_type, cron_expr, run_at)
-
-        if next_run_at is None:
-            raise HTTPException(400, "Could not compute next_run_at — check cron_expr/run_at")
-
-        payload["next_run_at"] = next_run_at
+        payload["next_run_at"] = _resolve_next_run(schedule_type, cron_expr, run_at)
 
     payload["updated_at"] = datetime.now(timezone.utc).isoformat()
 
