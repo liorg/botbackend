@@ -1,35 +1,33 @@
 # routers/calls.py
-from fastapi import APIRouter, Depends, HTTPException, Query
-from dependencies import get_supabase, get_current_user
-from supabase import Client
-from pydantic import BaseModel
+import logging
+import uuid
 from datetime import datetime, timedelta, timezone
-import httpx, os, uuid, logging
+from typing import Literal
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+from supabase import Client
+
+from dependencies import get_current_user, get_supabase
 
 router = APIRouter(prefix="/calls", tags=["calls"])
 logger = logging.getLogger(__name__)
 
-BACKEND_URL = os.getenv("BACKEND_URL", "https://vid.michal-solutions.com/api")
-#journalctl -u fastapi.service -n 50 --no-pager | grep -E "(calls|ERROR|error|500|422|phone)"
 CALL_TYPE_RECORDING = "recording"
-CALL_TYPE_SCHEDULER = "scheduler"
+CALL_TYPE_JOB = "job"
 
 
 class StartCallRequest(BaseModel):
-    phone_id:         str
-    contact_id:       str
-    scenario_id:      str | None = None
-    duration_seconds: int = 300
-    call_type:        str = CALL_TYPE_RECORDING
+    phone_id: str
+    contact_id: str
+    scenario_id: str | None = None
+    duration_seconds: int = Field(default=300, ge=1, le=86_400)
 
 
 class EndCallRequest(BaseModel):
     call_id: str
-    status:  str = "completed"
-
-
-def _build_callback_url(phone_id: str, contact_id: str) -> str:
-    return f"{BACKEND_URL}/webhook-registrations/callback/{phone_id}/{contact_id}"
+    status: Literal["completed", "failed", "cancelled"] = "completed"
 
 
 async def _get_agent_info(db: Client, phone_id: str):
@@ -43,12 +41,20 @@ async def _get_agent_info(db: Client, phone_id: str):
     if not res.data:
         logger.warning("[CALLS] Agent not found for phone_id=%s", phone_id)
         return None, None, ""
-    row      = res.data[0]
-    host     = row.get("agent_hosts") or {}
-    ip       = host.get("ip_address")
+
+    row = res.data[0]
+    host = row.get("agent_hosts") or {}
+    ip = host.get("ip_address")
     api_port = row.get("api_port")
-    number   = row.get("number", "")
-    logger.info("[CALLS] Agent info: phone_id=%s ip=%s port=%s number=%s", phone_id, ip, api_port, number)
+    number = row.get("number", "")
+
+    logger.info(
+        "[CALLS] Agent info: phone_id=%s ip=%s port=%s number=%s",
+        phone_id,
+        ip,
+        api_port,
+        number,
+    )
     return ip, api_port, number
 
 
@@ -63,40 +69,10 @@ async def _get_contact_number(db: Client, contact_id: str) -> str:
     if not res.data:
         logger.warning("[CALLS] Contact not found: contact_id=%s", contact_id)
         return ""
+
     number = res.data[0].get("number", "")
     logger.info("[CALLS] Contact number: contact_id=%s number=%s", contact_id, number)
     return number
-
-
-def _upsert_webhook(db: Client, callback_url: str, call_type: str, now: datetime):
-    """
-    Upsert webhook registration — עמיד בפני race conditions.
-    משתמש ב-on_conflict של Supabase במקום SELECT+INSERT ידני.
-    """
-    try:
-        db.table("webhook_registrations").upsert(
-            {
-                "callback_url": callback_url,
-                "type":         call_type,
-                "status":       "active",
-                "is_active":    True,
-                "created_at":   now.isoformat(),
-            },
-            on_conflict="callback_url,type",   # ← unique constraint
-        ).execute()
-        logger.info("[WEBHOOK] Upserted. url=%s type=%s", callback_url, call_type)
-    except Exception as e:
-        logger.error("[WEBHOOK] Upsert failed. url=%s type=%s error=%s", callback_url, call_type, e)
-        
-def _deactivate_webhook(db: Client, callback_url: str):
-    try:
-        db.table("webhook_registrations") \
-          .update({"is_active": False}) \
-          .eq("callback_url", callback_url) \
-          .execute()
-        logger.info("[WEBHOOK] Deactivated. url=%s", callback_url)
-    except Exception as e:
-        logger.error("[WEBHOOK] Failed to deactivate. url=%s error=%s", callback_url, e)
 
 
 @router.post("/start")
@@ -105,74 +81,89 @@ async def start_call(
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
-    logger.info("[CALLS][START] phone_id=%s contact_id=%s call_type=%s duration=%s",
-        body.phone_id, body.contact_id, body.call_type, body.duration_seconds)
+    logger.info(
+        "[CALLS][START] phone_id=%s contact_id=%s call_type=%s duration=%s",
+        body.phone_id,
+        body.contact_id,
+        CALL_TYPE_RECORDING,
+        body.duration_seconds,
+    )
 
-    if body.call_type not in (CALL_TYPE_RECORDING, CALL_TYPE_SCHEDULER):
-        logger.warning("[CALLS][START] Invalid call_type=%s", body.call_type)
-        raise HTTPException(400, f"Invalid call_type: {body.call_type}")
-
-    ip, api_port, phone_number = await _get_agent_info(db, body.phone_id)
+    ip, api_port, _phone_number = await _get_agent_info(db, body.phone_id)
     if not ip or not api_port:
-        raise HTTPException(404, "Agent not found for this phone")
+        raise HTTPException(status_code=404, detail="Agent not found for this phone")
 
     contact_number = await _get_contact_number(db, body.contact_id)
     if not contact_number:
-        raise HTTPException(404, "Contact phone number not found")
+        raise HTTPException(status_code=404, detail="Contact phone number not found")
 
-    now      = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
     expected = now + timedelta(seconds=body.duration_seconds)
-    call_id  = str(uuid.uuid4())
+    call_id = str(uuid.uuid4())
 
-    db.table("calls").insert({
-        "id":                     call_id,
-        "phone_id":               body.phone_id,
-        "contact_id":             body.contact_id,
-        "scenario_id":            body.scenario_id,
-        "status":                 "active",
-        "call_type":              body.call_type,
-        "started_at":             now.isoformat(),
-        "expected_end":           expected.isoformat(),
-        "created_at":             now.isoformat(),
-        "last_status_updated_at": now.isoformat(),
-    }).execute()
+    db.table("calls").insert(
+        {
+            "id": call_id,
+            "phone_id": body.phone_id,
+            "contact_id": body.contact_id,
+            "scenario_id": body.scenario_id,
+            "status": "active",
+            "call_type": CALL_TYPE_RECORDING,
+            "started_at": now.isoformat(),
+            "expected_end": expected.isoformat(),
+            "created_at": now.isoformat(),
+            "last_status_updated_at": now.isoformat(),
+        }
+    ).execute()
+
     logger.info("[CALLS][START] Call created. call_id=%s", call_id)
 
-    callback_url = _build_callback_url(body.phone_id, body.contact_id)
-    _upsert_webhook(db, callback_url, body.call_type, now)
-
+    # The permanent recording webhook is ensured once during app startup.
     agent_ok = False
     try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.post(
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(
                 f"http://{ip}:{api_port}/send",
-                json={"to": contact_number, "message": "שיחה התחילה", "call_id": call_id},
+                json={
+                    "to": contact_number,
+                    "message": "שיחה התחילה",
+                    "call_id": call_id,
+                },
             )
-            agent_ok = r.status_code < 300
-            logger.info("[CALLS][START] Agent notified. call_id=%s status=%s", call_id, r.status_code)
-    except Exception as e:
-        logger.error("[CALLS][START] Failed to notify agent. call_id=%s error=%s", call_id, e)
+            agent_ok = response.status_code < 300
+            logger.info(
+                "[CALLS][START] Agent notified. call_id=%s status=%s",
+                call_id,
+                response.status_code,
+            )
+    except Exception as exc:
+        logger.error(
+            "[CALLS][START] Failed to notify agent. call_id=%s error=%s",
+            call_id,
+            exc,
+        )
 
     return {
-        "call_id":      call_id,
-        "call_type":    body.call_type,
-        "status":       "active",
-        "started_at":   now.isoformat(),
+        "call_id": call_id,
+        "call_type": CALL_TYPE_RECORDING,
+        "status": "active",
+        "started_at": now.isoformat(),
         "expected_end": expected.isoformat(),
-        "agent_sent":   agent_ok,
-        "phone_id":     body.phone_id,
-        "contact_id":   body.contact_id,
+        "agent_sent": agent_ok,
+        "phone_id": body.phone_id,
+        "contact_id": body.contact_id,
     }
 
 
 @router.get("/{call_id}/messages")
 async def poll_call_messages(
     call_id: str,
-    since:   str | None = Query(None),
-    limit:   int        = Query(50, le=200),
+    since: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
+    """Read playback messages only. Call expiration is handled by the startup job."""
     logger.info("[CALLS][POLL] call_id=%s since=%s limit=%s", call_id, since, limit)
 
     call_res = (
@@ -184,18 +175,23 @@ async def poll_call_messages(
     )
     if not call_res.data:
         logger.warning("[CALLS][POLL] Call not found. call_id=%s", call_id)
-        raise HTTPException(404, "Call not found")
+        raise HTTPException(status_code=404, detail="Call not found")
 
     call = call_res.data[0]
-
     contact_id = call["contact_id"]
-    child_res  = db.table("contacts").select("id").eq("parent_contact_id", contact_id).execute()
-    child_ids  = [c["id"] for c in (child_res.data or [])]
-    all_ids    = [contact_id] + child_ids
+
+    child_res = (
+        db.table("contacts")
+        .select("id")
+        .eq("parent_contact_id", contact_id)
+        .execute()
+    )
+    child_ids = [child["id"] for child in (child_res.data or [])]
+    all_ids = [contact_id, *child_ids]
 
     from_ts = since or call.get("started_at") or ""
 
-    q = (
+    query = (
         db.table("messages")
         .select("id, contact_id, phone_id, sender, content, sent_at, direction, media_url")
         .eq("phone_id", call["phone_id"])
@@ -204,41 +200,34 @@ async def poll_call_messages(
         .limit(limit)
     )
     if from_ts:
-        q = q.gte("sent_at", from_ts)
+        query = query.gte("sent_at", from_ts)
 
-    msgs = q.execute().data or []
-    logger.info("[CALLS][POLL] call_id=%s messages_found=%d", call_id, len(msgs))
+    raw_messages = query.execute().data or []
+    logger.info("[CALLS][POLL] call_id=%s messages_found=%d", call_id, len(raw_messages))
 
-    call_status = call.get("status", "active")
-    expected    = call.get("expected_end")
-    if call_status == "active" and expected:
-        try:
-            exp_dt = datetime.fromisoformat(expected.replace("Z", "+00:00"))
-            if datetime.now(timezone.utc) > exp_dt:
-                logger.info("[CALLS][POLL] Call expired — marking completed. call_id=%s", call_id)
-                call_status = "completed"
-                db.table("calls").update({
-                    "status":                 "completed",
-                    "ended_at":               datetime.now(timezone.utc).isoformat(),
-                    "last_status_updated_at": datetime.now(timezone.utc).isoformat(),
-                }).eq("id", call_id).execute()
-                _deactivate_webhook(db, _build_callback_url(call["phone_id"], call["contact_id"]))
-        except Exception as e:
-            logger.error("[CALLS][POLL] Error checking expiry. call_id=%s error=%s", call_id, e)
-
-    phone_res    = db.table("phones").select("number").eq("id", call["phone_id"]).limit(1).execute()
+    phone_res = (
+        db.table("phones")
+        .select("number")
+        .eq("id", call["phone_id"])
+        .limit(1)
+        .execute()
+    )
     phone_number = (phone_res.data or [{}])[0].get("number", "")
 
     from routers.messages import format_message
-    messages = [format_message(m, phone_number, call["phone_id"]) for m in msgs]
+
+    messages = [
+        format_message(message, phone_number, call["phone_id"])
+        for message in raw_messages
+    ]
 
     return {
-        "call_id":      call_id,
-        "call_type":    call.get("call_type", CALL_TYPE_RECORDING),
-        "call_status":  call_status,
-        "expected_end": expected,
-        "ended_at":     call.get("ended_at"),
-        "messages":     messages,
+        "call_id": call_id,
+        "call_type": call.get("call_type", CALL_TYPE_JOB),
+        "call_status": call.get("status", "active"),
+        "expected_end": call.get("expected_end"),
+        "ended_at": call.get("ended_at"),
+        "messages": messages,
     }
 
 
@@ -248,31 +237,51 @@ async def end_call(
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
+    """Orderly end. It never disables the permanent listener webhook."""
     logger.info("[CALLS][END] call_id=%s status=%s", body.call_id, body.status)
 
     now = datetime.now(timezone.utc).isoformat()
-    res = (
+    result = (
         db.table("calls")
-        .update({
-            "status":                 body.status,
-            "ended_at":               now,
-            "last_status_updated_at": now,
-        })
+        .update(
+            {
+                "status": body.status,
+                "ended_at": now,
+                "last_status_updated_at": now,
+            }
+        )
         .eq("id", body.call_id)
+        .eq("status", "active")
         .execute()
     )
-    if not res.data:
-        logger.warning("[CALLS][END] Call not found. call_id=%s", body.call_id)
-        raise HTTPException(404, "Call not found")
 
-    call_data = res.data[0]
-    _deactivate_webhook(db, _build_callback_url(
-        call_data.get("phone_id", ""),
-        call_data.get("contact_id", ""),
-    ))
-    logger.info("[CALLS][END] ✓ call_id=%s ended_at=%s", body.call_id, now)
+    if not result.data:
+        existing = (
+            db.table("calls")
+            .select("id, status, ended_at")
+            .eq("id", body.call_id)
+            .limit(1)
+            .execute()
+        )
+        if not existing.data:
+            logger.warning("[CALLS][END] Call not found. call_id=%s", body.call_id)
+            raise HTTPException(status_code=404, detail="Call not found")
 
-    return {"call_id": body.call_id, "status": body.status, "ended_at": now}
+        current = existing.data[0]
+        return {
+            "call_id": body.call_id,
+            "status": current.get("status"),
+            "ended_at": current.get("ended_at"),
+            "already_ended": True,
+        }
+
+    logger.info("[CALLS][END] Completed. call_id=%s ended_at=%s", body.call_id, now)
+    return {
+        "call_id": body.call_id,
+        "status": body.status,
+        "ended_at": now,
+        "already_ended": False,
+    }
 
 
 @router.get("/{call_id}")
@@ -282,14 +291,15 @@ async def get_call(
     db: Client = Depends(get_supabase),
 ):
     logger.info("[CALLS][GET] call_id=%s", call_id)
-    res = (
+    result = (
         db.table("calls")
         .select("*")
         .eq("id", call_id)
         .limit(1)
         .execute()
     )
-    if not res.data:
+    if not result.data:
         logger.warning("[CALLS][GET] Not found. call_id=%s", call_id)
-        raise HTTPException(404, "Call not found")
-    return res.data[0]
+        raise HTTPException(status_code=404, detail="Call not found")
+
+    return result.data[0]
