@@ -1,162 +1,314 @@
-from fastapi import APIRouter, Depends
-from dependencies import get_supabase, get_current_user
-from supabase import Client
-from pydantic import BaseModel, Field
-import uuid, logging
-from datetime import datetime, timezone
+import logging
+from typing import Optional
 
-router = APIRouter(prefix="/webhook-registrations", tags=["webhook_registrations"])
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, ConfigDict, Field
+from supabase import Client
+
+from dependencies import get_current_user, get_supabase
+
+
+router = APIRouter(
+    prefix="/webhook-registrations",
+    tags=["webhook_registrations"],
+)
+
 logger = logging.getLogger(__name__)
 
-CALLBACK_BASE = "https://vid.michal-solutions.com/api/webhook-registrations/callback"
-
+# זמני בזיכרון.
+# מתאים רק ל-instance יחיד של FastAPI.
 _pending: dict[str, list[dict]] = {}
+
 
 def _key(phone_id: str, contact_id: str) -> str:
     return f"{phone_id}:{contact_id}"
 
 
-class RegisterRequest(BaseModel):
-    phone_id:   str
-    contact_id: str
-
-
 class MessagePayload(BaseModel):
-    MessageId:  str = Field(alias="MessageId", default="")
-    PhoneId:    str = Field(alias="PhoneId",   default="")
-    ContactId:  str = Field(alias="ContactId", default="")
-    Direction:  bool = Field(alias="Direction", default=False)
+    """
+    Payload שמגיע מ-HostAgent ב-camelCase:
 
-    model_config = {"populate_by_name": True}
+    {
+        "messageId": "...",
+        "whatsAppMessageId": "...",
+        "phoneId": "...",
+        "contactId": "...",
+        "direction": true
+    }
+    """
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+
+    # messages.id
+    message_id: str = Field(
+        default="",
+        alias="messageId",
+    )
+
+    # מזהה WhatsApp/Baileys
+    whatsapp_message_id: str = Field(
+        default="",
+        alias="whatsAppMessageId",
+    )
+
+    phone_id: str = Field(
+        default="",
+        alias="phoneId",
+    )
+
+    contact_id: str = Field(
+        default="",
+        alias="contactId",
+    )
+
+    # true = incoming, false = outgoing
+    direction: bool = Field(
+        default=False,
+        alias="direction",
+    )
 
 
-async def _resolve_call_id(db: Client, phone_id: str, contact_id: str) -> str | None:
-    res = (
+async def _resolve_recording_call_id(
+    db: Client,
+    phone_id: str,
+    contact_id: str,
+) -> Optional[str]:
+    """
+    מחפש רק recording call פעיל.
+
+    בפרויקט backend של recording הסטטוס הפעיל הוא active,
+    ולא running של Worker Scenario Runtime.
+    """
+
+    result = (
         db.table("calls")
         .select("id")
-        .eq("phone_id",   phone_id)
+        .eq("phone_id", phone_id)
         .eq("contact_id", contact_id)
+        .eq("call_type", "recording")
         .eq("status", "active")
         .order("created_at", desc=True)
         .limit(1)
         .execute()
     )
-    if res.data:
-        return res.data[0]["id"]
 
-    contact_res = (
+    if result.data:
+        return result.data[0]["id"]
+
+    # תמיכה במקרה שהודעה שייכת ל-child contact,
+    # אבל recording call נפתח על parent contact.
+    contact_result = (
         db.table("contacts")
         .select("parent_contact_id")
         .eq("id", contact_id)
         .limit(1)
         .execute()
     )
-    parent_id = (contact_res.data or [{}])[0].get("parent_contact_id")
-    if not parent_id:
+
+    parent_contact_id = (
+        contact_result.data or [{}]
+    )[0].get("parent_contact_id")
+
+    if not parent_contact_id:
         return None
 
-    res2 = (
+    parent_result = (
         db.table("calls")
         .select("id")
-        .eq("phone_id",   phone_id)
-        .eq("contact_id", parent_id)
+        .eq("phone_id", phone_id)
+        .eq("contact_id", parent_contact_id)
+        .eq("call_type", "recording")
         .eq("status", "active")
         .order("created_at", desc=True)
         .limit(1)
         .execute()
     )
-    return res2.data[0]["id"] if res2.data else None
+
+    return (
+        parent_result.data[0]["id"]
+        if parent_result.data
+        else None
+    )
 
 
-@router.post("/register")
-async def register_webhook(
-    body: RegisterRequest,
-    user=Depends(get_current_user),
-    db: Client = Depends(get_supabase),
-):
-    callback_url = f"{CALLBACK_BASE}/{body.phone_id}/{body.contact_id}"
-    db.table("webhook_registrations").delete() \
-      .eq("phone_id",   body.phone_id) \
-      .eq("contact_id", body.contact_id).execute()
-    db.table("webhook_registrations").insert({
-        "id":           str(uuid.uuid4()),
-        "phone_id":     body.phone_id,
-        "contact_id":   body.contact_id,
-        "callback_url": callback_url,
-        "type":         "recording",
-        "is_active":    True,
-        "created_at":   datetime.now(timezone.utc).isoformat(),
-    }).execute()
-    return {"callback_url": callback_url}
-
-
-@router.delete("/unregister")
-async def unregister_webhook(
-    body: RegisterRequest,
-    user=Depends(get_current_user),
-    db: Client = Depends(get_supabase),
-):
-    db.table("webhook_registrations").delete() \
-      .eq("phone_id",   body.phone_id) \
-      .eq("contact_id", body.contact_id).execute()
-    _pending.pop(_key(body.phone_id, body.contact_id), None)
-    return {"ok": True}
-
-
-@router.post("/callback/{phone_id}/{contact_id}")
+@router.post("/callback")
 async def receive_callback(
-    phone_id:   str,
-    contact_id: str,
     body: MessagePayload,
     db: Client = Depends(get_supabase),
 ):
-    message_id = body.MessageId
-    call_id    = await _resolve_call_id(db, phone_id, contact_id)
+    """
+    Callback גלובלי מסוג recording.
+
+    ה-HostAgent כבר שמר את ההודעה בטבלת messages.
+
+    ה-backend:
+      1. מאתר recording call פעיל.
+      2. מקשר messages.call_id.
+      3. שומר pending לצורך polling.
+    """
+
+    phone_id = body.phone_id
+    contact_id = body.contact_id
+    message_id = body.message_id
+    whatsapp_message_id = body.whatsapp_message_id
+
+    if not phone_id or not contact_id:
+        logger.warning(
+            "[RECORDING CALLBACK] missing phone/contact | "
+            "phone=%s contact=%s message=%s whatsapp=%s",
+            phone_id,
+            contact_id,
+            message_id,
+            whatsapp_message_id,
+        )
+
+        return {
+            "ok": False,
+            "error": "phoneId and contactId are required",
+        }
+
+    call_id = await _resolve_recording_call_id(
+        db,
+        phone_id,
+        contact_id,
+    )
 
     if call_id and message_id:
         try:
-            db.table("messages") \
-              .update({"call_id": call_id}) \
-              .eq("id", message_id) \
-              .execute()
-            logger.info("[CALLBACK] msg=%s → call=%s", message_id, call_id)
-        except Exception as e:
-            logger.warning("[CALLBACK] Failed to update call_id: %s", e)
+            update_result = (
+                db.table("messages")
+                .update(
+                    {
+                        "call_id": call_id,
+                    }
+                )
+                .eq("id", message_id)
+                .eq("phone_id", phone_id)
+                .eq("contact_id", contact_id)
+                .execute()
+            )
 
-    k = _key(phone_id, contact_id)
-    _pending.setdefault(k, []).append({
+            if update_result.data:
+                logger.info(
+                    "[RECORDING CALLBACK] message=%s whatsapp=%s "
+                    "call=%s direction=%s",
+                    message_id,
+                    whatsapp_message_id,
+                    call_id,
+                    "incoming" if body.direction else "outgoing",
+                )
+            else:
+                logger.warning(
+                    "[RECORDING CALLBACK] message not found | "
+                    "message=%s phone=%s contact=%s",
+                    message_id,
+                    phone_id,
+                    contact_id,
+                )
+
+        except Exception:
+            logger.exception(
+                "[RECORDING CALLBACK] failed updating message | "
+                "message=%s whatsapp=%s call=%s",
+                message_id,
+                whatsapp_message_id,
+                call_id,
+            )
+
+    pending_key = _key(
+        phone_id,
+        contact_id,
+    )
+
+    _pending.setdefault(
+        pending_key,
+        [],
+    ).append(
+        {
+            "message_id": message_id,
+            "whatsapp_message_id": whatsapp_message_id,
+            "phone_id": phone_id,
+            "contact_id": contact_id,
+            "direction": body.direction,
+            "call_id": call_id,
+        }
+    )
+
+    return {
+        "ok": True,
         "message_id": message_id,
-        "phone_id":   phone_id,
-        "contact_id": contact_id,
-        "direction":  body.Direction,
-        "call_id":    call_id,
-    })
-    return {"ok": True, "call_id": call_id}
+        "whatsapp_message_id": whatsapp_message_id,
+        "call_id": call_id,
+    }
 
 
 @router.get("/poll/{phone_id}/{contact_id}")
 async def poll_messages(
-    phone_id:   str,
+    phone_id: str,
     contact_id: str,
     user=Depends(get_current_user),
-    db: Client  = Depends(get_supabase),
+    db: Client = Depends(get_supabase),
 ):
-    k    = _key(phone_id, contact_id)
-    msgs = _pending.pop(k, [])
-    if not msgs:
-        return {"messages": []}
+    pending_key = _key(
+        phone_id,
+        contact_id,
+    )
 
-    ids          = [m["message_id"] for m in msgs if m.get("message_id")]
-    phone_res    = db.table("phones").select("number").eq("id", phone_id).limit(1).execute()
-    phone_number = (phone_res.data or [{}])[0].get("number", "")
+    pending_messages = _pending.pop(
+        pending_key,
+        [],
+    )
 
-    result = (
+    if not pending_messages:
+        return {
+            "messages": [],
+        }
+
+    message_ids = [
+        item["message_id"]
+        for item in pending_messages
+        if item.get("message_id")
+    ]
+
+    if not message_ids:
+        return {
+            "messages": [],
+        }
+
+    phone_result = (
+        db.table("phones")
+        .select("number")
+        .eq("id", phone_id)
+        .limit(1)
+        .execute()
+    )
+
+    phone_number = (
+        phone_result.data or [{}]
+    )[0].get("number", "")
+
+    message_result = (
         db.table("messages")
-        .select("id, contact_id, phone_id, sender, content, sent_at, direction, media_url")
-        .in_("id", ids)
+        .select(
+            "id, whatsapp_message_id, contact_id, phone_id, "
+            "sender, content, sent_at, direction, media_url, call_id"
+        )
+        .in_("id", message_ids)
         .order("sent_at")
         .execute()
     )
 
     from routers.messages import format_message
-    return {"messages": [format_message(m, phone_number, phone_id) for m in (result.data or [])]}
+
+    return {
+        "messages": [
+            format_message(
+                message,
+                phone_number,
+                phone_id,
+            )
+            for message in (message_result.data or [])
+        ],
+    }
