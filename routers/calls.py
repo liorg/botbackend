@@ -1,5 +1,4 @@
 # routers/calls.py
-
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -11,85 +10,44 @@ from supabase import Client
 
 from dependencies import get_current_user, get_supabase
 
-
 router = APIRouter(prefix="/calls", tags=["calls"])
 logger = logging.getLogger(__name__)
 
 CALL_TYPE_RECORDING = "recording"
-CALL_TYPE_JOB = "job"
+RUNNING_STATUS = "running"
+
+TERMINAL_STATUSES = {
+    "completed",
+    "failed",
+    "aborted",
+    "expired",
+    "timeout",
+}
 
 
 class StartCallRequest(BaseModel):
     phone_id: str
     contact_id: str
     scenario_id: str | None = None
-    duration_seconds: int = Field(
-        default=300,
-        ge=1,
-        le=86_400,
-    )
+    duration_seconds: int = Field(default=300, ge=1, le=86_400)
 
 
 class EndCallRequest(BaseModel):
     call_id: str
-
     status: Literal[
         "completed",
         "failed",
-        "cancelled",
+        "aborted",
+        "expired",
+        "timeout",
     ] = "completed"
 
 
-def _validate_phone(
-    db: Client,
-    phone_id: str,
-) -> None:
-    result = (
-        db.table("phones")
-        .select("id")
-        .eq("id", phone_id)
-        .limit(1)
-        .execute()
-    )
-
-    if not result.data:
-        raise HTTPException(
-            status_code=404,
-            detail="Phone not found",
-        )
-
-
-def _validate_contact(
-    db: Client,
-    phone_id: str,
-    contact_id: str,
-) -> None:
-    result = (
-        db.table("contacts")
-        .select("id")
-        .eq("id", contact_id)
-        .eq("phone_id", phone_id)
-        .limit(1)
-        .execute()
-    )
-
-    if not result.data:
-        raise HTTPException(
-            status_code=404,
-            detail="Contact not found for supplied phone",
-        )
-
-
-def _get_active_recording_call(
+def _get_running_recording_call(
     db: Client,
     phone_id: str,
     contact_id: str,
 ) -> dict | None:
-    """
-    מונע פתיחת יותר מ-recording call פעיל אחד
-    לאותו phone/contact.
-    """
-
     result = (
         db.table("calls")
         .select(
@@ -99,7 +57,7 @@ def _get_active_recording_call(
         .eq("phone_id", phone_id)
         .eq("contact_id", contact_id)
         .eq("call_type", CALL_TYPE_RECORDING)
-        .eq("status", "active")
+        .eq("status", RUNNING_STATUS)
         .order("created_at", desc=True)
         .limit(1)
         .execute()
@@ -114,16 +72,6 @@ async def start_call(
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
-    """
-    פותח חלון הקלטה.
-
-    אין כאן שליחה ל-HostAgent.
-    ה-recording webhook כבר נרשם באופן גלובלי ב-main.py.
-
-    הודעות שמגיעות בזמן שה-call פעיל יקושרו אליו
-    על ידי webhook_registrations.callback.
-    """
-
     logger.info(
         "[CALLS][START] phone=%s contact=%s type=%s duration=%s",
         body.phone_id,
@@ -132,29 +80,13 @@ async def start_call(
         body.duration_seconds,
     )
 
-    _validate_phone(
-        db,
-        body.phone_id,
-    )
-
-    _validate_contact(
-        db,
-        body.phone_id,
-        body.contact_id,
-    )
-
-    existing = _get_active_recording_call(
+    existing = _get_running_recording_call(
         db,
         body.phone_id,
         body.contact_id,
     )
 
     if existing:
-        logger.info(
-            "[CALLS][START] active recording already exists | call=%s",
-            existing["id"],
-        )
-
         return {
             "call_id": existing["id"],
             "call_type": CALL_TYPE_RECORDING,
@@ -163,15 +95,11 @@ async def start_call(
             "expected_end": existing.get("expected_end"),
             "phone_id": existing["phone_id"],
             "contact_id": existing["contact_id"],
-            "already_active": True,
+            "already_running": True,
         }
 
     now = datetime.now(timezone.utc)
-
-    expected_end = now + timedelta(
-        seconds=body.duration_seconds
-    )
-
+    expected_end = now + timedelta(seconds=body.duration_seconds)
     call_id = str(uuid.uuid4())
 
     result = (
@@ -182,7 +110,7 @@ async def start_call(
                 "phone_id": body.phone_id,
                 "contact_id": body.contact_id,
                 "scenario_id": body.scenario_id,
-                "status": "active",
+                "status": RUNNING_STATUS,
                 "call_type": CALL_TYPE_RECORDING,
                 "started_at": now.isoformat(),
                 "expected_end": expected_end.isoformat(),
@@ -194,30 +122,20 @@ async def start_call(
     )
 
     if not result.data:
-        logger.error(
-            "[CALLS][START] insert returned no data | call=%s",
-            call_id,
-        )
-
         raise HTTPException(
             status_code=500,
             detail="Failed creating recording call",
         )
 
-    logger.info(
-        "[CALLS][START] recording call created | call=%s",
-        call_id,
-    )
-
     return {
         "call_id": call_id,
         "call_type": CALL_TYPE_RECORDING,
-        "status": "active",
+        "status": RUNNING_STATUS,
         "started_at": now.isoformat(),
         "expected_end": expected_end.isoformat(),
         "phone_id": body.phone_id,
         "contact_id": body.contact_id,
-        "already_active": False,
+        "already_running": False,
     }
 
 
@@ -229,20 +147,6 @@ async def poll_call_messages(
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
-    """
-    מחזיר רק הודעות שקושרו ל-recording call המסוים.
-
-    הקישור messages.call_id נוצר ב-recording callback.
-    אין חיפוש כללי לפי contact/time, כדי שלא לערבב שיחות.
-    """
-
-    logger.info(
-        "[CALLS][POLL] call=%s since=%s limit=%s",
-        call_id,
-        since,
-        limit,
-    )
-
     call_result = (
         db.table("calls")
         .select(
@@ -256,11 +160,6 @@ async def poll_call_messages(
     )
 
     if not call_result.data:
-        logger.warning(
-            "[CALLS][POLL] recording call not found | call=%s",
-            call_id,
-        )
-
         raise HTTPException(
             status_code=404,
             detail="Recording call not found",
@@ -280,18 +179,9 @@ async def poll_call_messages(
     )
 
     if since:
-        query = query.gt(
-            "sent_at",
-            since,
-        )
+        query = query.gt("sent_at", since)
 
     raw_messages = query.execute().data or []
-
-    logger.info(
-        "[CALLS][POLL] call=%s messages=%s",
-        call_id,
-        len(raw_messages),
-    )
 
     phone_result = (
         db.table("phones")
@@ -301,18 +191,12 @@ async def poll_call_messages(
         .execute()
     )
 
-    phone_number = (
-        phone_result.data or [{}]
-    )[0].get("number", "")
+    phone_number = (phone_result.data or [{}])[0].get("number", "")
 
     from routers.messages import format_message
 
     messages = [
-        format_message(
-            message,
-            phone_number,
-            call["phone_id"],
-        )
+        format_message(message, phone_number, call["phone_id"])
         for message in raw_messages
     ]
 
@@ -332,12 +216,6 @@ async def end_call(
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
-    """
-    סוגר recording call.
-
-    לא מוחק ולא מכבה את ה-recording webhook הגלובלי.
-    """
-
     logger.info(
         "[CALLS][END] call=%s status=%s",
         body.call_id,
@@ -357,16 +235,14 @@ async def end_call(
         )
         .eq("id", body.call_id)
         .eq("call_type", CALL_TYPE_RECORDING)
-        .eq("status", "active")
+        .eq("status", RUNNING_STATUS)
         .execute()
     )
 
     if not result.data:
         existing = (
             db.table("calls")
-            .select(
-                "id, call_type, status, ended_at"
-            )
+            .select("id, call_type, status, ended_at")
             .eq("id", body.call_id)
             .limit(1)
             .execute()
@@ -392,12 +268,6 @@ async def end_call(
             "ended_at": current.get("ended_at"),
             "already_ended": True,
         }
-
-    logger.info(
-        "[CALLS][END] recording ended | call=%s ended_at=%s",
-        body.call_id,
-        now,
-    )
 
     return {
         "call_id": body.call_id,
