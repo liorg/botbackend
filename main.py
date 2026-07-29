@@ -29,7 +29,7 @@ from logging_config import get_logger, logging_middleware
 
 load_dotenv()
 
-version = "1.0.4.4"
+version = "1.0.4.5"
 logger = get_logger("main")
 
 BACKEND_URL = os.getenv("BACKEND_URL", "https://vid.michal-solutions.com/api").rstrip("/")
