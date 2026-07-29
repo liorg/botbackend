@@ -22,13 +22,14 @@ from routers import (
     webhook_registrations,
     notifications,
     active_chats,
+    contact_calls,    
 )
 from routers.compile_check import compile_router
 from logging_config import get_logger, logging_middleware
 
 load_dotenv()
 
-version = "1.0.4.3"
+version = "1.0.4.4"
 logger = get_logger("main")
 
 BACKEND_URL = os.getenv("BACKEND_URL", "https://vid.michal-solutions.com/api").rstrip("/")
@@ -175,7 +176,7 @@ app.include_router(webhook_registrations.router, prefix="/api")
 app.include_router(compile_router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
 app.include_router(active_chats.router, prefix="/api")
-
+app.include_router(contact_calls.router, prefix="/api")  # אותו prefix כמו scenarios
 
 # ── Startup / Shutdown ────────────────────────────────────────
 @app.on_event("startup")
