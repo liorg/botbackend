@@ -286,3 +286,43 @@ async def get_last_messages_for_phone(
             last[cid] = m
 
     return last
+# ══════════════════════════════════════════════════════════════════════
+# להוסיף ל-messages.py הקיים (אחרי get_messages_by_phone_and_contact)
+# לא מוחק / לא משנה שום endpoint קיים
+# ══════════════════════════════════════════════════════════════════════
+
+@router.get("/phone/{phone_id}/contact/{contact_id}/page")
+async def get_messages_page(
+    phone_id: str,
+    contact_id: str,
+    limit: int = Query(30, le=100),
+    before_sent_at: str | None = Query(None),   # cursor לגלילה אחורה
+    before_id: str | None = Query(None),
+    after_sent_at: str | None = Query(None),    # cursor ל-polling הודעות חדשות
+    db: Client = Depends(get_supabase),
+):
+    """
+    Paging אמיתי (keyset) להודעות איש קשר.
+    - בלי cursors        → העמוד האחרון (החדש ביותר)
+    - before_*           → עמוד ישן יותר (infinite scroll למעלה)
+    - after_sent_at      → רק הודעות חדשות (polling, בלי להוריד הכול)
+    מחזיר: { messages (ישן→חדש, מפורמט), has_more, next_cursor }
+    """
+    phone_res    = db.table("phones").select("number").eq("id", phone_id).limit(1).execute()
+    phone_number = (phone_res.data or [{}])[0].get("number", "")
+
+    res = db.rpc("messages_page", {
+        "p_contact_id":     contact_id,
+        "p_phone_id":       phone_id,
+        "p_limit":          limit,
+        "p_before_sent_at": before_sent_at,
+        "p_before_id":      before_id,
+        "p_after_sent_at":  after_sent_at,
+    }).execute()
+
+    data = res.data or {}
+    return {
+        "messages":    [format_message(m, phone_number, phone_id) for m in (data.get("messages") or [])],
+        "has_more":    bool(data.get("has_more")),
+        "next_cursor": data.get("next_cursor"),
+    }
