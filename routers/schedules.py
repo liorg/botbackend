@@ -52,6 +52,8 @@ VALID_TYPES    = {"once", "cron"}
 # סטטוסים שהלקוח רשאי לקבוע. firing מנוהל ע"י ה-Scheduler בלבד.
 CLIENT_STATUSES = {"active", "paused"}
 
+DEFAULT_LOG_PAGE_SIZE = 20
+
 
 # ── Schemas ────────────────────────────────────────────────────────────────
 
@@ -113,8 +115,28 @@ def _resolve_next_run(
     return next_run
 
 
+def _log_page_size(db: Client) -> int:
+    """גודל עמוד ללוג — נקרא מ-bot_config, עם fallback ותקרה."""
+    row = (
+        db.table("bot_config")
+        .select("value")
+        .eq("key", "schedule_log_page_size")
+        .maybe_single()
+        .execute()
+        .data
+    )
+
+    try:
+        size = int(row["value"]) if row else DEFAULT_LOG_PAGE_SIZE
+    except (ValueError, TypeError):
+        size = DEFAULT_LOG_PAGE_SIZE
+
+    return max(1, min(size, 200))
+
+
 # ── List ───────────────────────────────────────────────────────────────────
 
+@router.get("")
 @router.get("/")
 async def list_schedules(
     phone_id: Optional[str] = Query(None),
@@ -134,6 +156,49 @@ async def list_schedules(
         query = query.eq("status", status)
 
     return query.execute().data or []
+
+
+# ── Calls (לוג אירועים) — מדורג ────────────────────────────────────────────
+
+@router.get("/{schedule_id}/calls")
+async def schedule_calls(
+    schedule_id: str,
+    page: int = Query(1, ge=1),
+    db: Client = Depends(get_supabase),
+):
+    page_size = _log_page_size(db)
+
+    result = db.rpc(
+        "spine_schedule_calls_paged",
+        {
+            "p_schedule_id": schedule_id,
+            "p_limit": page_size,
+            "p_offset": (page - 1) * page_size,
+        },
+    ).execute().data or {"total": 0, "calls": []}
+
+    return {
+        "calls": result.get("calls", []),
+        "total": result.get("total", 0),
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+# ── Drill-down: אירועי Spine לשיחה ─────────────────────────────────────────
+# חייב להיות מוגדר לפני GET /{schedule_id} — אחרת "calls" נתפס כ-id.
+
+@router.get("/calls/{call_id}/events")
+async def call_events(
+    call_id: str,
+    db: Client = Depends(get_supabase),
+):
+    events = db.rpc(
+        "spine_call_events",
+        {"p_call_id": call_id},
+    ).execute().data or []
+
+    return {"events": events}
 
 
 # ── Get one ────────────────────────────────────────────────────────────────
@@ -158,27 +223,9 @@ async def get_schedule(
     return result
 
 
-# ── Calls (לוג אירועים) ────────────────────────────────────────────────────
-
-@router.get("/{schedule_id}/calls")
-async def schedule_calls(
-    schedule_id: str,
-    limit: int = Query(50, ge=1, le=200),
-    db: Client = Depends(get_supabase),
-):
-    calls = db.rpc(
-        "spine_schedule_calls",
-        {
-            "p_schedule_id": schedule_id,
-            "p_limit": limit,
-        },
-    ).execute().data or []
-
-    return {"calls": calls}
-
-
 # ── Create ─────────────────────────────────────────────────────────────────
 
+@router.post("", status_code=201)
 @router.post("/", status_code=201)
 async def create_schedule(
     body: ScheduleCreate,
@@ -311,7 +358,7 @@ async def run_schedule_now(
     db: Client = Depends(get_supabase),
 ):
     """
-    הרצה ידית: next_run=now + status=active.
+    הרצה ידנית: next_run=now + status=active.
 
     לא נוגעים ב-status='firing' — זה שייך ל-Scheduler בלבד.
     ה-Scheduler שולף status='active' עם next_run<=now בסבב הבא (≤30ש'),
