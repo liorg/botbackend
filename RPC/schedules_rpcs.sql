@@ -1,8 +1,6 @@
 -- ============================================================
 -- RPC: schedules_list — רשימת תזמונים + סטטוס call אחרון
--- קריאה אחת במקום schedules + calls (מונע roundtrip כפול).
 -- ============================================================
-
 create or replace function schedules_list(
   p_phone_id uuid default null,
   p_status   text default null
@@ -12,7 +10,7 @@ language sql
 stable
 as $fn$
   select coalesce(
-    jsonb_agg(to_jsonb(row) order by row.created_at desc),
+    jsonb_agg(to_jsonb(r) order by r.created_at desc),
     '[]'::jsonb
   )
   from (
@@ -31,9 +29,9 @@ as $fn$
       s.status,
       s.created_at,
       s.updated_at,
-      jsonb_build_object('name', sc.name)      as scenarios,
-      lc.status                                as last_call_status,
-      (lc.status = 'running')                  as running
+      jsonb_build_object('name', sc.name)              as scenarios,
+      lc.status                                        as last_call_status,
+      coalesce(lc.status = 'running', false)           as running
     from schedules s
     left join scenarios sc on sc.id = s.scenario_id
     left join lateral (
@@ -45,21 +43,18 @@ as $fn$
     ) lc on true
     where (p_phone_id is null or s.phone_id = p_phone_id)
       and (p_status   is null or s.status   = p_status)
-  ) row;
+  ) r;
 $fn$;
 
-
 -- ============================================================
--- RPC: schedule_get — תזמון בודד, אותו shape בדיוק
--- (משמש את ה-poll של כפתור ה-Play כל 5 שניות)
+-- RPC: schedule_get — תזמון בודד, אותו shape
 -- ============================================================
-
 create or replace function schedule_get(p_schedule_id uuid)
 returns jsonb
 language sql
 stable
 as $fn$
-  select to_jsonb(row)
+  select to_jsonb(r)
   from (
     select
       s.id,
@@ -76,9 +71,9 @@ as $fn$
       s.status,
       s.created_at,
       s.updated_at,
-      jsonb_build_object('name', sc.name)      as scenarios,
-      lc.status                                as last_call_status,
-      (lc.status = 'running')                  as running
+      jsonb_build_object('name', sc.name)              as scenarios,
+      lc.status                                        as last_call_status,
+      coalesce(lc.status = 'running', false)           as running
     from schedules s
     left join scenarios sc on sc.id = s.scenario_id
     left join lateral (
@@ -89,10 +84,8 @@ as $fn$
       limit 1
     ) lc on true
     where s.id = p_schedule_id
-  ) row;
+  ) r;
 $fn$;
 
-
--- אינדקס שה-lateral נשען עליו (אם לא קיים כבר):
 create index if not exists idx_calls_schedule_created
   on calls (schedule_id, created_at desc);
