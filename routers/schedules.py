@@ -143,19 +143,19 @@ async def list_schedules(
     status: Optional[str] = Query(None),
     db: Client = Depends(get_supabase),
 ):
-    query = (
-        db.table("schedules")
-        .select(SCHEDULE_COLUMNS)
-        .order("created_at", desc=True)
-    )
-
-    if phone_id:
-        query = query.eq("phone_id", phone_id)
-
-    if status:
-        query = query.eq("status", status)
-
-    return query.execute().data or []
+    """
+    RPC אחד (schedules_list) מחזיר את הכל בקריאה אחת:
+    שורות + scenarios(name) + last_call_status + running.
+    הכפתור במסך נגזר מ-last_call_status:
+      running → נעול (🔄) · completed/failed/אין calls → דלוק (▶)
+    """
+    return db.rpc(
+        "schedules_list",
+        {
+            "p_phone_id": phone_id,
+            "p_status": status,
+        },
+    ).execute().data or []
 
 
 # ── Calls (לוג אירועים) — מדורג ────────────────────────────────────────────
@@ -208,14 +208,11 @@ async def get_schedule(
     schedule_id: str,
     db: Client = Depends(get_supabase),
 ):
-    result = (
-        db.table("schedules")
-        .select(SCHEDULE_COLUMNS)
-        .eq("id", schedule_id)
-        .maybe_single()
-        .execute()
-        .data
-    )
+    # RPC אחד — אותו shape כמו schedules_list, לשורה בודדת
+    result = db.rpc(
+        "schedule_get",
+        {"p_schedule_id": schedule_id},
+    ).execute().data
 
     if not result:
         raise HTTPException(404, "Schedule not found")
