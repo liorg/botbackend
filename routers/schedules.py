@@ -134,6 +134,37 @@ def _log_page_size(db: Client) -> int:
     return max(1, min(size, 200))
 
 
+def _resolve_scenario(
+    db: Client,
+    scenario_id: str,
+    phone_id: Optional[str],
+) -> dict:
+    """
+    מוודא שהתרחיש קיים ושייך לטלפון, ומחזיר אותו.
+    ה-contact_id של התזמון נגזר מהתרחיש — לא מהלקוח.
+    מונע את הבאג של תזמון שמצביע על תרחיש/איש קשר מטלפון אחר.
+    """
+    scenario = (
+        db.table("scenarios")
+        .select("id, phone_id, contact_id")
+        .eq("id", scenario_id)
+        .maybe_single()
+        .execute()
+        .data
+    )
+
+    if not scenario:
+        raise HTTPException(400, "Scenario not found")
+
+    if phone_id and scenario["phone_id"] != phone_id:
+        raise HTTPException(
+            400,
+            "Scenario belongs to a different phone",
+        )
+
+    return scenario
+
+
 # ── List ───────────────────────────────────────────────────────────────────
 
 @router.get("")
@@ -256,6 +287,13 @@ async def create_schedule(
         if value is not None:
             payload[field] = value
 
+    # התרחיש חייב להשתייך לטלפון; איש הקשר נגזר מהתרחיש (מקור אמת יחיד)
+    if payload.get("scenario_id"):
+        scenario = _resolve_scenario(
+            db, payload["scenario_id"], payload.get("phone_id")
+        )
+        payload["contact_id"] = scenario["contact_id"]
+
     payload["next_run"] = next_run
 
     result = (
@@ -336,6 +374,27 @@ async def update_schedule(
                     .data
                 )
                 return row
+
+    # שינוי תרחיש/טלפון — אותה ולידציה כמו ב-create
+    if "scenario_id" in payload or "phone_id" in payload:
+        existing = (
+            db.table("schedules")
+            .select("phone_id, scenario_id")
+            .eq("id", schedule_id)
+            .maybe_single()
+            .execute()
+            .data
+        )
+
+        if not existing:
+            raise HTTPException(404, "Schedule not found")
+
+        scenario_id = payload.get("scenario_id", existing.get("scenario_id"))
+        phone_id    = payload.get("phone_id",    existing.get("phone_id"))
+
+        if scenario_id:
+            scenario = _resolve_scenario(db, scenario_id, phone_id)
+            payload["contact_id"] = scenario["contact_id"]
 
     payload["updated_at"] = datetime.now(timezone.utc).isoformat()
 
