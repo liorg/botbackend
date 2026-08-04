@@ -310,7 +310,32 @@ async def update_schedule(
         cron_expr     = payload.get("cron_expr",     current.get("cron_expr"))
         run_at        = payload.get("run_at",        current.get("run_at"))
 
-        payload["next_run"] = _resolve_next_run(schedule_type, cron_expr, run_at)
+        # מחשבים next_run מחדש רק אם ה-timing באמת השתנה.
+        # ה-UI שולח תמיד schedule_type+cron_expr בכל שמירה — בלי ההשוואה
+        # הזו, שמירה של שינוי שם הייתה דורסת next_run=now() של Play ממתין.
+        timing_changed = (
+            schedule_type != current.get("schedule_type")
+            or cron_expr  != current.get("cron_expr")
+            or run_at     != current.get("run_at")
+        )
+
+        if timing_changed:
+            payload["next_run"] = _resolve_next_run(schedule_type, cron_expr, run_at)
+        else:
+            # אין שינוי אמיתי — לא נוגעים ב-next_run הקיים
+            for f in timing_fields:
+                payload.pop(f, None)
+            if not payload:
+                # נשאר רק updated_at — אין מה לעדכן, מחזירים את הקיים
+                row = (
+                    db.table("schedules")
+                    .select(SCHEDULE_COLUMNS)
+                    .eq("id", schedule_id)
+                    .maybe_single()
+                    .execute()
+                    .data
+                )
+                return row
 
     payload["updated_at"] = datetime.now(timezone.utc).isoformat()
 
