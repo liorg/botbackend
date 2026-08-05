@@ -14,7 +14,9 @@ router = APIRouter(prefix="/calls", tags=["calls"])
 logger = logging.getLogger(__name__)
 
 CALL_TYPE_RECORDING = "recording"
-RUNNING_STATUS = "running"
+# חייב להיות "active" — כל ה-backend של ההקלטה (callback, expiry worker,
+# frontend) מסתנכרן על active. "running" שבר את קישור ההודעות.
+RUNNING_STATUS = "active"
 
 TERMINAL_STATUSES = {
     "completed",
@@ -137,6 +139,19 @@ async def start_call(
         "contact_id": body.contact_id,
         "already_running": False,
     }
+
+
+# חשוב: חייב להיות לפני @router.get("/{call_id}") כדי ש-"active"
+# לא ייתפס כ-call_id.
+@router.get("/active/{phone_id}/{contact_id}")
+async def get_active_call(
+    phone_id: str,
+    contact_id: str,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    call = _get_running_recording_call(db, phone_id, contact_id)
+    return {"active": bool(call), "call": call}
 
 
 @router.get("/{call_id}/messages")
