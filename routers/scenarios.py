@@ -8,6 +8,25 @@ import uuid
 
 router = APIRouter(prefix="/phones/{phone_id}/scenarios", tags=["scenarios"])
 
+BOT_CONFIG_PAGE_KEY = "scenarios.paging"
+DEFAULT_PAGE_SIZE = 10
+
+
+def _get_page_size(db: Client) -> int:
+    try:
+        res = (
+            db.table("bot_config")
+            .select("value")
+            .eq("key", BOT_CONFIG_PAGE_KEY)
+            .limit(1)
+            .execute()
+        )
+        if res.data:
+            n = int(res.data[0]["value"])
+            return max(1, min(100, n))
+    except Exception:
+        pass
+    return DEFAULT_PAGE_SIZE
 
 # ── Schemas ────────────────────────────────────────────────────────────────
 
@@ -83,17 +102,35 @@ _SELECT = (
 
 
 # ── List scenarios ─────────────────────────────────────────────────────────
+# ── List scenarios (paginated) ─────────────────────────────────────────────
 @router.get("/")
-async def list_scenarios(phone_id: str, db: Client = Depends(get_supabase)):
+async def list_scenarios(
+    phone_id: str,
+    page: int = 1,
+    db: Client = Depends(get_supabase),
+):
+    page = max(1, page)
+    page_size = _get_page_size(db)
+    start = (page - 1) * page_size
+    end = start + page_size - 1
+
     result = (
         db.table("scenarios")
-        .select(_SELECT)
+        .select(_SELECT, count="exact")
         .eq("phone_id", phone_id)
         .order("created_at", desc=True)
+        .range(start, end)
         .execute()
     )
-    return [_expand_config(r) for r in (result.data or [])]
 
+    total = result.count or 0
+    return {
+        "items": [_expand_config(r) for r in (result.data or [])],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max(1, (total + page_size - 1) // page_size),
+    }
 
 # ── List by event_type ─────────────────────────────────────────────────────
 @router.get("/by-type/{event_type}")
