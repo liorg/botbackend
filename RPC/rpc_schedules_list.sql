@@ -1,35 +1,21 @@
--- ─────────────────────────────────────────────────────────────────────────────
--- rpc_schedules_list — רשימת תזמונים לגריד, עם דפדוף בצד שרת.
---
--- שם חדש בקונבנציה rpc_* : כל פונקציה שנקראת מהראוטר דרך sb.rpc() נושאת
--- את התחילית, כדי שיהיה אפשר להבדיל במבט אחד בין RPC של ה-API לבין
--- פונקציות פנימיות (bot_config_int) ולוגיקת Spine (spine_ensure_call).
---
--- מחליפה את schedules_list הישן. הגוף זהה, בתוספת:
---   p_page = null → כל השורות (התנהגות הישן)
---   p_page = N    → עמוד N, גודל העמוד נגזר מ-bot_config בתוך ה-RPC
--- וההחזרה היא אובייקט {schedules, total, page, page_size} במקום מערך.
---
--- מיגרציה: יוצרים חדש → מעדכנים את הראוטר → מוודאים → מוחקים ישן.
---   grep -rn "schedules_list" /opt/ICR      -- לאתר קוראים נוספים
---   drop function if exists schedules_list(uuid, text);   -- רק אחרי אימות
--- ─────────────────────────────────────────────────────────────────────────────
-
-insert into bot_config(key, value, description)
-values ('schedules_page_size', '20', 'גודל עמוד בגריד התזמונים')
-on conflict (key) do nothing;
-
 
 create or replace function rpc_schedules_list(
   p_phone_id uuid default null,
   p_status   text default null,
   p_page     int  default null      -- null = ללא דפדוף (תאימות לישן)
 ) returns jsonb
-language sql stable as $$
-  with cfg as (
-    select least(greatest(bot_config_int('schedules_page_size', 20), 1), 200) as size
-  ),
-  base as (
+language plpgsql stable as $$
+-- plpgsql ולא sql: ב-LIMIT/OFFSET אסור להתייחס לעמודה מ-FROM
+-- ("argument of OFFSET must not contain variables"), אבל משתנה
+-- מקומי של plpgsql עובר כפרמטר ולכן מותר.
+declare
+  v_size int := least(greatest(bot_config_int('schedules_page_size', 20), 1), 200);
+  v_lim  int := case when p_page is null then null else v_size end;
+  v_off  int := case when p_page is null then 0
+                     else (greatest(p_page, 1) - 1) * v_size end;
+  v_out  jsonb;
+begin
+  with base as (
     select
       s.id,
       s.user_id,
@@ -61,13 +47,11 @@ language sql stable as $$
       and (p_status   is null or s.status   = p_status)
   ),
   pg as (
-    select r.*
-    from base r, cfg
-    order by r.created_at desc
-    -- p_page null → כל השורות; אחרת חלון של size
-    limit  case when p_page is null then null else cfg.size end
-    offset case when p_page is null then 0
-                else (greatest(p_page, 1) - 1) * cfg.size end
+    select b.*
+    from base b
+    order by b.created_at desc
+    limit  v_lim          -- null → כל השורות
+    offset v_off
   )
   select jsonb_build_object(
     'schedules', coalesce(
@@ -75,6 +59,10 @@ language sql stable as $$
                    '[]'::jsonb),
     'total',     (select count(*) from base),
     'page',      greatest(coalesce(p_page, 1), 1),
-    'page_size', (select size from cfg)
-  );
-$$;
+    'page_size', v_size
+  )
+  into v_out;
+ 
+  return v_out;
+end $$;
+ 
