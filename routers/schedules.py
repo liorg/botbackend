@@ -52,7 +52,8 @@ VALID_TYPES    = {"once", "cron"}
 # סטטוסים שהלקוח רשאי לקבוע. firing מנוהל ע"י ה-Scheduler בלבד.
 CLIENT_STATUSES = {"active", "paused"}
 
-DEFAULT_LOG_PAGE_SIZE = 20
+DEFAULT_LOG_PAGE_SIZE       = 20
+DEFAULT_SCHEDULES_PAGE_SIZE = 20   # fallback בלבד; המקור הוא bot_config ב-RPC
 
 
 # ── Schemas ────────────────────────────────────────────────────────────────
@@ -175,10 +176,11 @@ async def list_schedules(
     db: Client = Depends(get_supabase),
 ):
     """
+    ⚠️ הגרסה הישנה — מחזירה מערך שטוח. נשארת ללא שינוי עבור קוראים קיימים
+    בייצור. הגריד עבר ל-/schedules/paged.
+
     RPC אחד (schedules_list) מחזיר את הכל בקריאה אחת:
     שורות + scenarios(name) + last_call_status + running.
-    הכפתור במסך נגזר מ-last_call_status:
-      running → נעול (🔄) · completed/failed/אין calls → דלוק (▶)
     """
     return db.rpc(
         "schedules_list",
@@ -187,6 +189,38 @@ async def list_schedules(
             "p_status": status,
         },
     ).execute().data or []
+
+
+# ⚠️ חייב להופיע לפני GET /{schedule_id}, אחרת "paged" ייתפס כ-schedule_id
+@router.get("/paged")
+async def list_schedules_paged(
+    phone_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    db: Client = Depends(get_supabase),
+):
+    """
+    רשימת תזמונים מדורגת לגריד — { schedules, total, page, page_size }.
+
+    endpoint נפרד ולא שינוי של GET /schedules, כדי שצורת ההחזרה החדשה
+    (אובייקט במקום מערך) לא תשבור קוראים קיימים בייצור.
+
+    הדפדוף כולו בתוך ה-RPC: גודל העמוד נקרא שם מ-bot_config
+    ('schedules_page_size') וה-offset מחושב מ-p_page. הראוטר לא מחשב כלום.
+    """
+    return db.rpc(
+        "rpc_schedules_list",
+        {
+            "p_phone_id": phone_id,
+            "p_status": status,
+            "p_page": page,
+        },
+    ).execute().data or {
+        "schedules": [],
+        "total": 0,
+        "page": page,
+        "page_size": DEFAULT_SCHEDULES_PAGE_SIZE,
+    }
 
 
 # ── Calls (לוג אירועים) — מדורג ────────────────────────────────────────────
