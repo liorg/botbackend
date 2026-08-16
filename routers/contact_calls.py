@@ -90,11 +90,14 @@ async def list_contact_calls_paged(
 @router.get("/{call_id}/flow")
 async def get_call_flow(contact_id: str, call_id: str, db: Client = Depends(get_supabase)):
     result = db.rpc(
-        "get_call_flow",
+        "rpc_get_call_flow",
         {"p_contact_id": contact_id, "p_call_id": call_id},
     ).execute()
 
     data = result.data
+    if isinstance(data, list):          # jsonb עלול לחזור עטוף ברשימה
+        data = data[0] if data else None
+
     if not data or not data.get("call"):
         raise HTTPException(status_code=404, detail="Call not found")
     return data
