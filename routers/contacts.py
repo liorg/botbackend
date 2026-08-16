@@ -7,7 +7,7 @@ from typing import Optional
 from datetime import datetime, timedelta, timezone
 
 from dependencies import get_supabase, get_current_user
-from contact_lang import (                       # ⬅️ חדש
+from routers.contact_lang import (               # ⬅️ חדש
     get_user_lang_by_phone, get_contact_lang,
     get_ping_message, normalize_lang,
 )
