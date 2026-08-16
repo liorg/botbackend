@@ -281,6 +281,35 @@ async def create_contact(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/contacts/{contact_id}")
+async def get_contact(
+    contact_id: str,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    """שליפת שורה טרייה מה-DB — נקרא ב-EditContactModal בזמן פתיחה,
+    כדי לא להסתמך על ה-state המקומי (עלול להיות מיושן)."""
+    try:
+        result = (
+            db.table("contacts")
+            .select(
+                "id, phone_id, number, name, whatsapp_name, tag, lid, lang, "
+                "email, is_connect, parent_contact_id, created_at, updated_at"
+            )
+            .eq("id", contact_id)
+            .single()
+            .execute()
+        )
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Contact not found")
+        return result.data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting contact {contact_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.patch("/contacts/{contact_id}")
 async def update_contact(
     contact_id: str,
