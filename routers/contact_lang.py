@@ -1,5 +1,5 @@
-# contact_lang.py — עזרי שפה לאיש קשר + נוסח הודעת הבדיקה (PING)
-# מיקום מוצע: לצד dependencies.py
+# routers/contact_lang.py — עזרי שפה לאיש קשר + נוסח הודעת הבדיקה (PING)
+# מודול עזר (לא ראוטר) — אין בו APIRouter ואין לרשום אותו ב-main.py
 from supabase import Client
 
 DEFAULT_LANG = "he"
