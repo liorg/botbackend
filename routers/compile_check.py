@@ -22,9 +22,9 @@ logger = get_logger("compile_check")
 
 compile_router = APIRouter(prefix="/scenarios", tags=["scenario-dev"])
 
-# ברירת מחדל: שם השירות ב-docker-compose (worker/scenario-worker) בפורט 9000.
-# ב-Swarm/פרודקשן — לדרוס ל-service name / hostname האמיתי של ה-Worker הייעודי לבדיקות.
-DEV_WORKER_URL = os.getenv("DEV_WORKER_URL", "http://scenario-worker:9000").rstrip("/")
+# ברירת מחדל: localhost:9000 — ה-Worker חשוף כ-127.0.0.1:9000 על אותו host שבו רץ ה-Spine.
+# אם ה-Spine עצמו רץ בתוך container, יש לוודא שהוא על network=host, או לדרוס כאן.
+DEV_WORKER_URL = os.getenv("DEV_WORKER_URL", "http://localhost:9000").rstrip("/")
 WORKER_TIMEOUT = float(os.getenv("WORKER_DEV_TIMEOUT", "30"))
 
 
