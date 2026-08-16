@@ -1,10 +1,14 @@
 # scenarios_router.py
+import json
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException
 from dependencies import get_supabase
 from supabase import Client
 from pydantic import BaseModel
 from typing import Optional, Any, Literal
 import uuid
+
+from routers.compile_check import _post_worker  # ⬅️ אותו לקוח HTTP + DEV_WORKER_URL שכבר משמש את compile-check
 
 router = APIRouter(prefix="/phones/{phone_id}/scenarios", tags=["scenarios"])
 
@@ -99,6 +103,93 @@ _SELECT = (
     "created_at, estimated_duration_minutes, inter_leaf_response_time, "
     "contacts(id, name, number, avatar, is_bot)"
 )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ── Server-side publish validation ──────────────────────────────────────────
+# מראה קוד ל-src/utils/componentTypes.js:isValid — אותה לוגיקה, בפייתון,
+# כדי שלקוח שמדלג על הבדיקות (או קורא ל-publish ישירות) לא יוכל לפרסם תרחיש שבור.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _comp_is_valid(comp: dict) -> bool:
+    t = comp.get("type")
+    if t in ("text", "menu", "input"):
+        return bool((comp.get("value") or "").strip())
+    if t == "buttons":
+        return bool((comp.get("header") or "").strip())
+    if t == "button_select":
+        return bool((comp.get("buttonId") or "").strip()) and bool((comp.get("buttonText") or "").strip())
+    if t == "menu_select":
+        return bool((comp.get("menuId") or "").strip()) and bool((comp.get("menuText") or "").strip())
+    if t in ("card_sender", "card_expect"):
+        return bool((comp.get("code") or "").strip())
+    return True
+
+
+async def _check_component_deno(comp: dict) -> Optional[dict]:
+    """מריץ /dev/deno/test על עלה בודד. מחזיר issue אם נכשל, אחרת None."""
+    card_type = "expect" if comp.get("type") == "card_expect" else "sender"
+    try:
+        result = await _post_worker("/dev/deno/test", {
+            "code":       comp.get("code") or "",
+            "card_type":  card_type,
+            "timeout_ms": 5000,
+        })
+    except HTTPException as e:
+        return {"source": "deno", "compId": comp.get("id"), "compType": comp.get("type"), "message": str(e.detail)}
+
+    if not result.get("ok"):
+        msg = result.get("detail") or result.get("error") or "קוד Deno לא תקין"
+        return {"source": "deno", "compId": comp.get("id"), "compType": comp.get("type"), "message": str(msg)}
+    return None
+
+
+async def _run_publish_checks(row: dict) -> list[dict]:
+    """ולידציה + Deno per-leaf + Compile מלא — אותו סדר שרץ בצד הלקוח, נאכף עכשיו גם בשרת."""
+    issues: list[dict] = []
+    cfg    = row.get("config") or {}
+    canvas = cfg.get("canvas") or []
+
+    # 1) ולידציית שדות
+    for comp in canvas:
+        if not _comp_is_valid(comp):
+            issues.append({
+                "source": "validation", "compId": comp.get("id"), "compType": comp.get("type"),
+                "message": "רכיב לא תקין — שדה חובה חסר",
+            })
+
+    # 2) בדיקת קוד Deno לכל card_sender/card_expect עם קוד (מקבילית)
+    code_comps = [c for c in canvas if c.get("type") in ("card_sender", "card_expect") and (c.get("code") or "").strip()]
+    if code_comps:
+        results = await asyncio.gather(*[_check_component_deno(c) for c in code_comps])
+        issues.extend([r for r in results if r])
+
+    # 3) קומפילציה מלאה — רק אם 1+2 נקיים
+    if not issues:
+        scenario_json = json.dumps({
+            "fileName":      row.get("name"),
+            "description":   cfg.get("description", ""),
+            "botContact":    cfg.get("bot_contact"),
+            "phone":         (cfg.get("bot_contact") or {}).get("phone", "") if cfg.get("bot_contact") else "",
+            "interval":      cfg.get("interval", {"mins": 0, "secs": 1}),
+            "estimatedTime": cfg.get("estimated_time"),
+            "arrowData":     cfg.get("arrow_data", {}),
+            "canvas":        canvas,
+            "eventType":     row.get("event_type") or cfg.get("event_type", "scheduler"),
+        }, ensure_ascii=False)
+
+        try:
+            compile_res = await _post_worker("/dev/scenario/compile", {"scenario_json": scenario_json})
+        except HTTPException as e:
+            issues.append({"source": "compile", "compId": None, "compType": None, "message": str(e.detail)})
+        else:
+            if not compile_res.get("ok"):
+                msgs = compile_res.get("error") or "קומפילציה נכשלה"
+                issues.append({"source": "compile", "compId": None, "compType": None, "message": str(msgs)})
+            for w in (compile_res.get("warnings") or []):
+                issues.append({"source": "compile", "compId": None, "compType": None, "message": f"⚠ {w}"})
+
+    return issues
 
 
 # ── List scenarios ─────────────────────────────────────────────────────────
@@ -242,6 +333,23 @@ async def update_scenario(
 async def publish_scenario(
     phone_id: str, scenario_id: str, db: Client = Depends(get_supabase)
 ):
+    # ⬅️ שולפים את השורה המלאה (כולל config) — לא רק לבדוק שהיא קיימת
+    existing = (
+        db.table("scenarios")
+        .select("id, name, event_type, config")
+        .eq("id", scenario_id)
+        .eq("phone_id", phone_id)
+        .single()
+        .execute()
+    )
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+
+    # ⬅️ ולידציה + Deno + Compile — נאכף בשרת, לא רק ב-UI
+    issues = await _run_publish_checks(existing.data)
+    if issues:
+        raise HTTPException(status_code=422, detail={"ok": False, "issues": issues})
+
     result = (
         db.table("scenarios")
         .update({"status": "active"})
