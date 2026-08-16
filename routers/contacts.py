@@ -7,6 +7,10 @@ from typing import Optional
 from datetime import datetime, timedelta, timezone
 
 from dependencies import get_supabase, get_current_user
+from contact_lang import (                       # ⬅️ חדש
+    get_user_lang_by_phone, get_contact_lang,
+    get_ping_message, normalize_lang,
+)
 from supabase import Client
 from logging_config import get_logger
 
@@ -26,6 +30,7 @@ class CreateContactFromPingRequest(BaseModel):
     target_number: str
     name: Optional[str] = None
     override_contact_id: Optional[str] = None
+    lang: Optional[str] = None                   # ⬅️ אם לא נשלח — נגזר בשרת
 
 
 class SelectResponseRequest(BaseModel):
@@ -39,6 +44,7 @@ class UpdateContactRequest(BaseModel):
     email: Optional[str] = None
     tag: Optional[str] = None
     lid: Optional[str] = None
+    lang: Optional[str] = None                   # ⬅️ ניתן לעריכה
 
 
 class CheckPhoneResponse(BaseModel):
@@ -220,12 +226,6 @@ async def get_contact_messages(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── replace the whole `list_contacts` function in routers/contacts.py with this ──
-
-# routers/contacts.py — החלף רק את list_contacts
-
-# routers/contacts.py — החלף רק את list_contacts
-
 @router.get("/contacts")
 async def list_contacts(
     phone_id: str,
@@ -235,7 +235,10 @@ async def list_contacts(
     try:
         result = (
             db.table("contacts")
-            .select("id, phone_id, number, name, whatsapp_name, tag, lid, is_connect, parent_contact_id, created_at, updated_at")
+            .select(
+                "id, phone_id, number, name, whatsapp_name, tag, lid, lang, "  # ⬅️ lang
+                "is_connect, parent_contact_id, created_at, updated_at"
+            )
             .eq("phone_id", phone_id)
             .order("updated_at", desc=True)
             .execute()
@@ -244,6 +247,7 @@ async def list_contacts(
     except Exception as e:
         logger.error(f"Error listing contacts: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.post("/contacts")
 async def create_contact(
@@ -255,6 +259,11 @@ async def create_contact(
     try:
         clean_num = body.get("phone", "").replace("+", "").replace(" ", "")
         user_id   = await _get_user_id_for_phone(db, phone_id)
+
+        # ⬅️ שפה: מפורש ← שפת המשתמש
+        lang = (normalize_lang(body.get("lang")) if body.get("lang")
+                else get_user_lang_by_phone(db, phone_id))
+
         contact_data = {
             "phone_id": phone_id,
             "number":   clean_num,
@@ -263,6 +272,7 @@ async def create_contact(
             "tag":      body.get("tag", "new"),
             "lid":      body.get("lid") or clean_num,
             "user_id":  user_id,
+            "lang":     lang,                        # ⬅️
         }
         result = db.table("contacts").insert(contact_data).execute()
         return result.data[0] if result.data else {}
@@ -284,6 +294,7 @@ async def update_contact(
         if body.email is not None: update_data["email"] = body.email
         if body.tag   is not None: update_data["tag"]   = body.tag
         if body.lid   is not None: update_data["lid"]   = body.lid
+        if body.lang  is not None: update_data["lang"]  = normalize_lang(body.lang)  # ⬅️
 
         if not update_data:
             raise HTTPException(status_code=400, detail="No fields to update")
@@ -341,16 +352,28 @@ async def create_contact_from_ping(
     try:
         user_id = await _get_user_id_for_phone(db, body.phone_id)
 
+        # ⬅️ שפה: מפורש ← איש קשר קיים (override) ← שפת המשתמש
+        if body.lang:
+            lang = normalize_lang(body.lang)
+        elif body.override_contact_id:
+            lang = get_contact_lang(db, body.override_contact_id)
+        else:
+            lang = get_user_lang_by_phone(db, body.phone_id)
+
         if body.override_contact_id:
             existing = db.table("contacts").select("*").eq("id", body.override_contact_id).execute()
             if not existing.data:
                 raise HTTPException(status_code=404, detail="Contact not found for override")
             contact = existing.data[0]
-            db.table("contacts").update({
+
+            upd = {
                 "lid":  None,
                 "tag":  "new",
                 "name": body.name or contact.get("name"),
-            }).eq("id", body.override_contact_id).execute()
+            }
+            if body.lang:                               # ⬅️ רק אם נבחרה שפה מפורשת
+                upd["lang"] = lang
+            db.table("contacts").update(upd).eq("id", body.override_contact_id).execute()
             contact = {**contact, "lid": None, "tag": "new"}
 
         else:
@@ -363,6 +386,11 @@ async def create_contact_from_ping(
             )
             if existing.data:
                 contact = existing.data[0]
+
+                # ⬅️ איש קשר קיים לפי מספר — עדיפות לשפה השמורה עליו
+                if not body.lang and contact.get("lang"):
+                    lang = normalize_lang(contact["lang"])
+
                 if contact.get("tag") == "draft":
                     db.table("contacts").update({
                         "tag":  "new",
@@ -381,9 +409,10 @@ async def create_contact_from_ping(
                         "lid":      clean_number,
                         "tag":      "new",
                         "user_id":  user_id,
+                        "lang":     lang,               # ⬅️
                     }).execute()
                     contact = result.data[0]
-                    logger.info(f"[PING] Created new contact: {contact['id']}")
+                    logger.info(f"[PING] Created new contact: {contact['id']} lang={lang}")
                 except Exception as insert_err:
                     if "23505" in str(insert_err) or "duplicate key" in str(insert_err):
                         existing2 = (
@@ -396,6 +425,8 @@ async def create_contact_from_ping(
                         )
                         if existing2.data:
                             contact = existing2.data[0]
+                            if not body.lang and contact.get("lang"):     # ⬅️
+                                lang = normalize_lang(contact["lang"])
                             logger.info(f"[PING] Found existing by lid fallback: {contact['id']}")
                         else:
                             raise
@@ -412,10 +443,14 @@ async def create_contact_from_ping(
 
         agent_url = f"http://{agent_ip}:5000/api/phones/{body.phone_id}/send/ping"
 
+        # ⬅️ הודעת בדיקה מנוסחת לפי שפה — במקום אימוג'י פעמון
+        ping_text = get_ping_message(lang)
+        logger.info(f"[PING] lang={lang} contact={contact['id']}")
+
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
                 agent_url,
-                json={"jid": f"{clean_number}@s.whatsapp.net", "text": "🔔"},
+                json={"jid": f"{clean_number}@s.whatsapp.net", "text": ping_text},   # ⬅️
                 headers={"X-Agent-Token": AGENT_TOKEN, "Content-Type": "application/json"},
             )
             response.raise_for_status()
@@ -460,6 +495,8 @@ async def create_contact_from_ping(
             "contact_id":          contact["id"],
             "ping_sender_id":      ping_sender_id,
             "whatsapp_message_id": whatsapp_message_id,
+            "lang":                lang,          # ⬅️ ה-UI יכול להציג מה נשלח
+            "ping_text":           ping_text,     # ⬅️
             "message":             "PING sent successfully. Waiting for response...",
         }
 
