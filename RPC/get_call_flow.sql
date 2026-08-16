@@ -80,6 +80,21 @@ select jsonb_build_object(
       from spine_leaves sl
       where sl.call_id = p_call_id
     ) t
+  ),
+
+  -- ── spine_events של השיחה ────────────────────────────────────────────
+  'events', (
+    select coalesce(jsonb_agg(
+      jsonb_build_object(
+        'id',         se.id,
+        'event_type', se.event_type,
+        'step_id',    se.step_id,
+        'timestamp',  se.timestamp,
+        'data',       se.data
+      ) order by se.timestamp, se.id
+    ), '[]'::jsonb)
+    from spine_events se
+    where se.call_id = p_call_id
   )
 );
 $$;
