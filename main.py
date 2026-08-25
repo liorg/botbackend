@@ -22,7 +22,8 @@ from routers import (
     webhook_registrations,
     notifications,
     active_chats,
-    contact_calls,    
+    contact_calls, 
+    phone_admin
 )
 from routers.compile_check import compile_router
 from logging_config import get_logger, logging_middleware
@@ -164,6 +165,7 @@ app.middleware("http")(logging_middleware)
 
 # ── Routers ───────────────────────────────────────────────────
 app.include_router(auth.router, prefix="/api")
+app.include_router(phone_admin.router, prefix="/api")   # ← לפני phones
 app.include_router(phones.router, prefix="/api")
 app.include_router(contacts.router, prefix="/api")
 app.include_router(scenarios.router, prefix="/api")
