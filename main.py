@@ -68,45 +68,18 @@ def _create_service_db() -> Client:
 
 def _ensure_recording_webhook(db: Client) -> None:
     """Ensure the permanent recording webhook registration exists and remains active."""
-    existing = (
-        db.table("webhook_registrations")
-        .select("id")
-        .eq("callback_url", RECORDING_WEBHOOK_URL)
-        .eq("type", WEBHOOK_TYPE_RECORDING)
-        .limit(1)
-        .execute()
-    )
-
-    if existing.data:
-        db.table("webhook_registrations").update(
-            {
-                "status": "active",
-                "is_active": True,
-            }
-        ).eq("id", existing.data[0]["id"]).execute()
-
-        logger.info(
-            "Recording webhook already exists and is active",
-            extra={"callback_url": RECORDING_WEBHOOK_URL},
-        )
-        return
-
     now = datetime.now(timezone.utc).isoformat()
-    db.table("webhook_registrations").insert(
+
+    db.table("webhook_registrations").upsert(
         {
             "callback_url": RECORDING_WEBHOOK_URL,
             "type": WEBHOOK_TYPE_RECORDING,
             "status": "active",
             "is_active": True,
             "created_at": now,
-        }
+        },
+        on_conflict="callback_url,type",
     ).execute()
-
-    logger.info(
-        "Recording webhook created",
-        extra={"callback_url": RECORDING_WEBHOOK_URL},
-    )
-
 
 def _expire_recording_calls(db: Client) -> int:
     """Mark only expired, still-active recording playback calls as expired."""
