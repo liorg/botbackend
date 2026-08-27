@@ -1,0 +1,82 @@
+version: "3.8"
+
+services:
+  backend:
+    image: liorgr/scenariobot-api:latest
+
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      JWT_SECRET: ${JWT_SECRET}
+      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      FRONTEND_URL: ${FRONTEND_URL}
+      ENV: ${ENV}
+
+      BACKEND_URL: https://backend.grossman.bot/api
+
+      DEV_WORKER_URL: http://scenario-worker:9100
+      WORKER_DEV_TIMEOUT: "30"
+
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcs-key.json
+
+    volumes:
+      - /home/lior/fastapi-app/gcs-key.json:/run/secrets/gcs-key.json:ro
+
+    ports:
+      - target: 8000
+        published: 8010
+        protocol: tcp
+        mode: ingress
+
+    networks:
+      - scenario_net
+
+    deploy:
+      replicas: 2
+
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 0
+
+      update_config:
+        order: start-first
+        failure_action: rollback
+        delay: 10s
+
+      resources:
+        limits:
+          memory: 512M
+
+
+  scenario-worker:
+    image: liorgr/worker-scenario-runtime:latest
+
+    environment:
+      ASPNETCORE_URLS: http://+:9100
+
+    networks:
+      - scenario_net
+
+    deploy:
+      replicas: 1
+
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 0
+
+      update_config:
+        order: stop-first
+        failure_action: rollback
+        delay: 10s
+
+      resources:
+        limits:
+          memory: 512M
+
+
+networks:
+  scenario_net:
+    driver: overlay
+    attachable: true
