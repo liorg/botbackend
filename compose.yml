@@ -1,6 +1,7 @@
 version: "3.8"
 
 services:
+
   backend:
     image: liorgr/scenariobot-api:latest
 
@@ -20,7 +21,7 @@ services:
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcs-key.json
 
     volumes:
-      - /home/lior/fastapi-app/gcs-key.json:/run/secrets/gcs-key.json:ro
+      - /opt/fastapi-app/gcs-key.json:/run/secrets/gcs-key.json:ro
 
     ports:
       - target: 8000
