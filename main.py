@@ -30,7 +30,7 @@ from logging_config import get_logger, logging_middleware
 
 load_dotenv()
 
-version = "1.0.4.7"
+version = "1.0.5.0"
 logger = get_logger("main")
 
 BACKEND_URL = os.getenv("BACKEND_URL", "https://vid.michal-solutions.com/api").rstrip("/")
@@ -198,10 +198,7 @@ async def startup():
     await asyncio.to_thread(_ensure_recording_webhook, app.state.service_db)
 
     # Safety net for recording playback calls that never received an orderly end.
-    app.state.recording_expiry_task = asyncio.create_task(
-        _recording_expiry_worker(),
-        name="recording-call-expiry",
-    )
+    # app.state.recording_expiry_task = asyncio.create_task( _recording_expiry_worker(),    name="recording-call-expiry",    )
 
 
 @app.on_event("shutdown")
