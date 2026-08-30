@@ -1,4 +1,4 @@
-name: Deploy to Server
+name: Deploy to  Only for Server
 
 on:
   push:
