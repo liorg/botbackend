@@ -25,12 +25,13 @@ from routers import (
     contact_calls, 
     phone_admin
 )
+from routers.template_manager import router as templates_router
 from routers.compile_check import compile_router
 from logging_config import get_logger, logging_middleware
 
 load_dotenv()
 
-version = "1.0.5.1"
+version = "1.0.5.2"
 logger = get_logger("main")
 
 BACKEND_URL = os.getenv("BACKEND_URL", "https://vid.michal-solutions.com/api").rstrip("/")
@@ -152,6 +153,7 @@ app.include_router(compile_router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
 app.include_router(active_chats.router, prefix="/api")
 app.include_router(contact_calls.router, prefix="/api")  # אותו prefix כמו scenarios
+app.include_router(templates_router, prefix="/api")
 
 # ── Startup / Shutdown ────────────────────────────────────────
 @app.on_event("startup")

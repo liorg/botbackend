@@ -7,7 +7,7 @@ from supabase import Client
 from pydantic import BaseModel
 from typing import Optional, Any, Literal
 import uuid
-
+from routers.template_manager import validate_scenario_templates
 from routers.compile_check import _post_worker  # ⬅️ אותו לקוח HTTP + DEV_WORKER_URL שכבר משמש את compile-check
 
 router = APIRouter(prefix="/phones/{phone_id}/scenarios", tags=["scenarios"])
@@ -113,7 +113,10 @@ _SELECT = (
 
 def _comp_is_valid(comp: dict) -> bool:
     t = comp.get("type")
-    if t in ("text", "menu", "input"):
+    if t == "input":
+        # תבנית מחליפה את הטקסט החופשי
+        return bool((comp.get("value") or "").strip()) or bool(comp.get("templateId"))
+    if t in ("text", "menu"):
         return bool((comp.get("value") or "").strip())
     if t == "buttons":
         return bool((comp.get("header") or "").strip())
@@ -124,6 +127,7 @@ def _comp_is_valid(comp: dict) -> bool:
     if t in ("card_sender", "card_expect"):
         return bool((comp.get("code") or "").strip())
     return True
+ 
 
 
 async def _check_component_deno(comp: dict) -> Optional[dict]:
@@ -144,7 +148,7 @@ async def _check_component_deno(comp: dict) -> Optional[dict]:
     return None
 
 
-async def _run_publish_checks(row: dict) -> list[dict]:
+async def _run_publish_checks(row: dict, db: Client, phone_id: str) -> list[dict]:
     """ולידציה + Deno per-leaf + Compile מלא — אותו סדר שרץ בצד הלקוח, נאכף עכשיו גם בשרת."""
     issues: list[dict] = []
     cfg    = row.get("config") or {}
@@ -157,6 +161,17 @@ async def _run_publish_checks(row: dict) -> list[dict]:
                 "source": "validation", "compId": comp.get("id"), "compType": comp.get("type"),
                 "message": "רכיב לא תקין — שדה חובה חסר",
             })
+
+    # 1b) ⬅️ חדש: תרחיש scheduler מחייב תבנית מאושרת+מפורסמת בכל רכיב input
+    issues.extend(
+        validate_scenario_templates(
+            db=db,
+            phone_id=phone_id,
+            canvas=canvas,
+            event_type=row.get("event_type") or cfg.get("event_type", "scheduler"),
+        )
+    )
+ 
 
     # 2) בדיקת קוד Deno לכל card_sender/card_expect עם קוד (מקבילית)
     code_comps = [c for c in canvas if c.get("type") in ("card_sender", "card_expect") and (c.get("code") or "").strip()]
