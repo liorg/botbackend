@@ -31,6 +31,10 @@ from pydantic import BaseModel
 from dependencies import get_supabase, get_current_user
 from supabase import Client
 from logging_config import get_logger
+import httpx
+
+from routers.phones import _get_host_for_phone, _agent_post
+
 
 logger = get_logger("templates")
 
@@ -57,6 +61,19 @@ _SELECT = (
     "is_published, param_count, provider_template_id, rejected_reason, "
     "created_at, updated_at"
 )
+
+# ── 3. עזר — הוסף ליד _default_lang ─────────────────────────────────────────
+def _to_jid(raw: str) -> str:
+    """
+    אותה לוגיקה כמו ב-send.py של ה-Spine.
+    LID הוא מזהה ארוך; מספר רגיל קצר יותר. שליחת LID עם הסיומת הלא נכונה
+    מתקבלת ע"י WhatsApp אך ההודעה נעלמת בלי message_status.
+    """
+    jid = (raw or "").strip()
+    if "@" in jid:
+        return jid
+    return f"{jid}@lid" if len(jid) >= 14 else f"{jid}@s.whatsapp.net"
+
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -283,6 +300,10 @@ def _expand(row: dict) -> dict:
 # ══════════════════════════════════════════════════════════════════════════
 # Schemas
 # ══════════════════════════════════════════════════════════════════════════
+class TestSendReq(BaseModel):
+    """to = מספר או jid מלא. params ריק → נלקחות הדוגמאות מהתבנית."""
+    to:     str
+    params: Optional[dict[str, list[str]]] = None
 
 class TemplateCreate(BaseModel):
     name: str
@@ -309,6 +330,164 @@ class StatusUpdate(BaseModel):
 # Endpoints — סדר חשוב: נתיבים קבועים לפני /{template_id}
 # ══════════════════════════════════════════════════════════════════════════
 
+# ── 4. endpoints — הוסף לפני delete_template ────────────────────────────────
+
+@router.post("/{template_id}/test-send")
+async def test_send(
+    phone_id: str,
+    template_id: str,
+    body: TestSendReq,
+    db: Client = Depends(get_supabase),
+):
+    """
+    שליחת בדיקה של תבנית מאושרת, גם אם עדיין לא פורסמה.
+    הדגל test=true אומר ל-HostAgent לוותר על בדיקת is_published בלבד —
+    status חייב להישאר approved.
+    """
+    if not (body.to or "").strip():
+        raise HTTPException(status_code=400, detail="to is required")
+
+    res = (
+        db.table("phone_templates")
+        .select("id, name, lang, status, is_published, content, examples")
+        .eq("id", template_id)
+        .eq("phone_id", phone_id)
+        .limit(1)
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Template not found")
+    row = res.data[0]
+
+    if row.get("status") != "approved":
+        raise HTTPException(
+            status_code=409,
+            detail={"ok": False, "issues": [_iss("tplErrNotApproved", status=row.get("status"))]},
+        )
+
+    content = row.get("content") or {}
+    issues = _validate(
+        row.get("name") or "",
+        row.get("lang") or "",
+        content,
+        row.get("examples") or {},
+    )
+    if issues:
+        raise HTTPException(status_code=422, detail={"ok": False, "issues": issues})
+
+    # ── השלמת פרמטרים חסרים מהדוגמאות ─────────────────────────────────────
+    pm = _param_map(content)
+    supplied = body.params or {}
+    examples = row.get("examples") or {}
+    params: dict[str, list[str]] = {}
+
+    for part in ("header", "body"):
+        need = len(pm[part])
+        given = list(supplied.get(part) or [])
+        fallback = list(examples.get(part) or [])
+        vals = []
+        for i in range(need):
+            v = given[i] if i < len(given) and str(given[i]).strip() else None
+            if v is None:
+                v = fallback[i] if i < len(fallback) else ""
+            vals.append(str(v))
+        params[part] = vals
+
+    # ── HostAgent ─────────────────────────────────────────────────────────
+    host = await _get_host_for_phone(db, phone_id)
+    if not host:
+        raise HTTPException(status_code=503, detail="No agent available for this phone")
+
+    payload = {
+        "jid":        _to_jid(body.to),
+        "name":       row["name"],
+        "lang":       row["lang"],
+        "templateId": row["id"],
+        "params":     params,
+        "test":       True,
+    }
+
+    logger.info(
+        f"[TPL] test-send {row['name']}/{row['lang']} → {payload['jid']} "
+        f"phone={phone_id} host={host.get('host_name')}"
+    )
+
+    try:
+        data = await _agent_post(
+            host["ip_address"],
+            f"/api/phones/{phone_id}/send/template",
+            payload,
+            timeout=25,
+        )
+    except httpx.HTTPStatusError as e:
+        # ה-HostAgent מחזיר 404/409/400/501 עם detail מפורש
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text[:400])
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Agent unreachable: {e}")
+
+    return {
+        "ok":         True,
+        "message_id": (data or {}).get("messageId"),
+        "jid":        payload["jid"],
+        "params":     params,
+    }
+
+
+@router.post("/{template_id}/approve-publish")
+async def approve_and_publish(
+    phone_id: str,
+    template_id: str,
+    db: Client = Depends(get_supabase),
+):
+    """
+    baileys: אין גורם חיצוני שמאשר, אז אישור ופרסום הם פעולה אחת.
+    whatsapp: האישור מגיע מ-Meta — כאן רק מפרסמים תבנית שכבר approved.
+    """
+    phone = _phone_row(db, phone_id)
+    provider = phone.get("provider") or "baileys"
+
+    existing = (
+        db.table("phone_templates")
+        .select("id, name, lang, status, content, examples")
+        .eq("id", template_id)
+        .eq("phone_id", phone_id)
+        .limit(1)
+        .execute()
+    )
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="Template not found")
+    row = existing.data[0]
+
+    issues = _validate(
+        row.get("name") or "",
+        row.get("lang") or "",
+        row.get("content") or {},
+        row.get("examples") or {},
+    )
+
+    # רק ב-baileys מותר לקפוץ מעל האישור.
+    if provider != "baileys" and row.get("status") != "approved":
+        issues.append(_iss("tplErrNotApproved", status=row.get("status")))
+
+    if issues:
+        raise HTTPException(status_code=422, detail={"ok": False, "issues": issues})
+
+    result = (
+        db.table("phone_templates")
+        .update({
+            "status":          "approved",
+            "is_published":    True,
+            "rejected_reason": None,
+            "updated_at":      _now(),
+        })
+        .eq("id", template_id)
+        .eq("phone_id", phone_id)
+        .execute()
+    )
+
+    logger.info(f"[TPL] approve+publish {row['name']}/{row['lang']} phone={phone_id}")
+    return _expand(result.data[0])
+    
 @router.get("/")
 async def list_templates(
     phone_id: str,
