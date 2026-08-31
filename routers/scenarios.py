@@ -361,7 +361,8 @@ async def publish_scenario(
         raise HTTPException(status_code=404, detail="Scenario not found")
 
     # ⬅️ ולידציה + Deno + Compile — נאכף בשרת, לא רק ב-UI
-    issues = await _run_publish_checks(existing.data)
+    # issues = await _run_publish_checks(existing.data)
+    issues = await _run_publish_checks(existing.data, db, phone_id)
     if issues:
         raise HTTPException(status_code=422, detail={"ok": False, "issues": issues})
 
