@@ -785,8 +785,52 @@ async def delete_template(
 # ══════════════════════════════════════════════════════════════════════════
 # ולידציית קישור תבנית לתרחיש — נקרא מ-scenarios.py בעת publish (סעיף 11)
 # ══════════════════════════════════════════════════════════════════════════
-
 def validate_scenario_templates(
+    db: Client,
+    phone_id: str,
+    canvas: list[dict],
+    event_type: str,
+) -> list[dict]:
+
+    issues = []
+
+    # רק scheduler דורש Template בהודעה הראשונה
+    if event_type != "scheduler":
+        return issues
+
+    first_send = next(
+        (
+            comp for comp in canvas
+            if comp.get("type") == "input"
+            and comp.get("side") == "send"
+        ),
+        None,
+    )
+
+    if not first_send:
+        return issues
+
+    template_id = first_send.get("templateId")
+
+    if not template_id:
+        issues.append({
+            "source": "template",
+            "compId": first_send.get("id"),
+            "compType": first_send.get("type"),
+            "code": "tplErrSchedulerNoTemplate",
+        })
+        return issues
+
+    # מכאן ממשיכות הבדיקות הקיימות שלך:
+    # template קיים
+    # שייך ל-phone
+    # published
+    # approved
+    # וכו'
+
+    return issues
+    
+def validate_scenario_templates2(
     db: Client,
     phone_id: str,
     canvas: list[dict],
