@@ -56,8 +56,6 @@ jobs:
             set -e
 
             cd /opt/scenario-stack
-            git fetch origin
-            git reset --hard origin/main
             ./deploy.sh
 
             echo
