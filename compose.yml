@@ -55,7 +55,7 @@ services:
 
     environment:
       ASPNETCORE_URLS: http://+:9100
-
+      PORT: "9100"
     networks:
       - scenario_net
 
