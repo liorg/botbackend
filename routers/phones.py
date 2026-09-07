@@ -240,6 +240,13 @@ async def provision_phone(
 
         phone_id = data.get("phoneId") or (phone["id"] if phone else None)
 
+        if phone_id:
+            try:
+                from routers.template_manager import ensure_hello_world
+                ensure_hello_world(db, phone_id)
+            except Exception as e:
+                logger.warning(f"[PROVISION] hello_world seed failed {phone_id}: {e}")
+
         logger.info(
             f"[PROVISION] {'Created' if is_new else 'Reused'} phone "
             f"{clean_number} → id={phone_id}"
