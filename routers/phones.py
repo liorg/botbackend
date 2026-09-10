@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from dependencies import get_supabase, get_current_user
 from supabase import Client
 from logging_config import get_logger
-
+from config import internal_route,client_route,APP_MODE 
 logger = get_logger("phones")
 
 router = APIRouter(prefix="/phones", tags=["phones"])
@@ -163,8 +163,7 @@ async def list_phones(user=Depends(get_current_user), db: Client = Depends(get_s
     result = db.table("phones").select("*").eq("user_id", user["uid"]).execute()
     return result.data
 
-
-@router.get("/agents/health")
+@internal_route(router.get("/agents/health"))
 async def agents_health(user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     hosts = await _get_active_hosts(db)
     results = []
@@ -397,7 +396,7 @@ async def delete_phone(phone_id: str, user=Depends(get_current_user), db: Client
     return {"ok": True}
 
 
-@router.patch("/{phone_id}/docker-status")
+@internal_route(router.patch("/{phone_id}/docker-status"))
 async def update_docker_status(phone_id: str, body: dict, db: Client = Depends(get_supabase)):
     result = db.table("phones").update({
         "docker_status": body["status"],
