@@ -10,21 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from supabase import Client, create_client
 
 from routers import (
-    auth,
-    phones,
-    contacts,
-    scenarios,
-    schedules,
-    calls,
-    messages,
-    proxy_media,
-    phones_contacts,
-    webhook_registrations,
-    notifications,
-    active_chats,
-    contact_calls, 
-    wa_override_ab,  
-    phone_admin
+    auth,  phones,  contacts,  scenarios,   schedules,   calls,messages,  proxy_media,  phones_contacts,  webhook_registrations, notifications, active_chats,contact_calls, wa_override_ab,phone_admin
 )
 from routers.template_manager import router as templates_router
 from routers.compile_check import compile_router
@@ -32,7 +18,7 @@ from logging_config import get_logger, logging_middleware
 
 load_dotenv()
 
-version = "1.0.7.1"
+version = "1.0.7.3"
 logger = get_logger("main")
 
 BACKEND_URL = os.getenv("BACKEND_URL", "https://vid.michal-solutions.com/api").rstrip("/")
