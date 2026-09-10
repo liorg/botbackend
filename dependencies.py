@@ -3,10 +3,7 @@ from supabase import Client, create_client
 from supabase.client import ClientOptions
 import jwt
 import os
-
-
-APP_MODE = os.getenv("APP_MODE", "client").lower()
-
+from config import APP_MODE
 
 def get_supabase(
     authorization: str | None = Header(None),
