@@ -5,7 +5,7 @@ import os
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import Client, create_client
 
@@ -32,7 +32,7 @@ from logging_config import get_logger, logging_middleware
 
 load_dotenv()
 
-version = "1.0.6.0"
+version = "1.0.7.0"
 logger = get_logger("main")
 
 BACKEND_URL = os.getenv("BACKEND_URL", "https://vid.michal-solutions.com/api").rstrip("/")
@@ -51,7 +51,12 @@ CALL_EXPIRY_INTERVAL_SECONDS = max(
 
 app = FastAPI(title="ScenarioBot API", version=version)
 
+APP_MODE = os.getenv("APP_MODE", "client").lower()
 
+if APP_MODE not in {"client", "internal"}:
+    raise RuntimeError(
+        f"Invalid APP_MODE: {APP_MODE}. Expected 'client' or 'internal'."
+    )
 # ── Infrastructure helpers ────────────────────────────────────
 def _create_service_db() -> Client:
     url = os.getenv("SUPABASE_URL")
@@ -137,46 +142,62 @@ app.add_middleware(
 )
 
 app.middleware("http")(logging_middleware)
-
-# ── Routers ───────────────────────────────────────────────────
-app.include_router(auth.router, prefix="/api")
-app.include_router(phone_admin.router, prefix="/api")   # ← לפני phones
-app.include_router(phones.router, prefix="/api")
-app.include_router(contacts.router, prefix="/api")
-app.include_router(scenarios.router, prefix="/api")
-app.include_router(schedules.router, prefix="/api")
-app.include_router(calls.router, prefix="/api")
-app.include_router(messages.router, prefix="/api")
-app.include_router(proxy_media.router, prefix="/api")
-app.include_router(phones_contacts.router, prefix="/api")
-app.include_router(webhook_registrations.router, prefix="/api")
-app.include_router(compile_router, prefix="/api")
-app.include_router(notifications.router, prefix="/api")
-app.include_router(active_chats.router, prefix="/api")
-app.include_router(contact_calls.router, prefix="/api")  # אותו prefix כמו scenarios
-app.include_router(templates_router, prefix="/api")
-app.include_router(wa_override_ab.router, prefix="/api")   # 
-
+if APP_MODE == "internal":
+    # ── Routers ───────────────────────────────────────────────────
+    app.include_router(auth.router, prefix="/api")
+    app.include_router(phone_admin.router, prefix="/api")   # ← לפני phones
+    app.include_router(phones.router, prefix="/api")
+    app.include_router(contacts.router, prefix="/api")
+    app.include_router(scenarios.router, prefix="/api")
+    app.include_router(schedules.router, prefix="/api")
+    app.include_router(calls.router, prefix="/api")
+    app.include_router(messages.router, prefix="/api")
+    app.include_router(proxy_media.router, prefix="/api")
+    app.include_router(phones_contacts.router, prefix="/api")
+    app.include_router(webhook_registrations.router, prefix="/api")
+    app.include_router(compile_router, prefix="/api")
+    app.include_router(notifications.router, prefix="/api")
+    app.include_router(active_chats.router, prefix="/api")
+    app.include_router(contact_calls.router, prefix="/api")  
+    app.include_router(templates_router, prefix="/api")
+    app.include_router(wa_override_ab.router, prefix="/api")   
+    
+elif APP_MODE == "client":
+    # בהתחלה רק endpoints שאתה באמת רוצה לחשוף
+    app.include_router(phones.router, prefix="/api")
+    
 # ── Startup / Shutdown ────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
     logger.info(
-        "ScenarioBot API starting",
+        f"ScenarioBot API starting - APP_MODE={APP_MODE}",
         extra={
             "action": "startup",
             "version": version,
             "environment": os.getenv("ENV", "production"),
+            "app_mode": APP_MODE,
         },
     )
 
-    app.state.service_db = _create_service_db()
+    # רק INTERNAL מקבל service_role ועושה webhook registration
+    if APP_MODE == "internal":
+        app.state.service_db = _create_service_db()
 
-    # Permanent recording webhook: create only when missing; never deactivate on call end.
-    await asyncio.to_thread(_ensure_recording_webhook, app.state.service_db)
+        await asyncio.to_thread(
+            _ensure_recording_webhook,
+            app.state.service_db,
+        )
 
-    # Safety net for recording playback calls that never received an orderly end.
-    # app.state.recording_expiry_task = asyncio.create_task( _recording_expiry_worker(),    name="recording-call-expiry",    )
+        logger.info(
+            "Internal mode - service DB initialized and recording webhook ensured"
+        )
 
+    else:
+        app.state.service_db = None
+
+        logger.info(
+            "Client mode - service DB and recording webhook disabled"
+        )
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -197,11 +218,83 @@ async def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": version}
+    return {
+        "status": "ok",
+        "version": version,
+        "app_mode": APP_MODE,
+    }
 
 
 @app.get("/whoami")
-def whoami():
-    db = _create_service_db()
-    result = db.table("users").select("count", count="exact").execute()
-    return {"status": "ok", "supabase": "connected", "users_count": result.count}
+def whoami(
+    authorization: str | None = Header(None)
+):
+    # INTERNAL
+    if APP_MODE == "internal":
+        db = _create_service_db()
+
+        result = (
+            db.table("users")
+            .select("count", count="exact")
+            .execute()
+        )
+
+        return {
+            "status": "ok",
+            "version": version,
+            "app_mode": APP_MODE,
+            "supabase": "connected",
+            "users_count": result.count,
+        }
+
+    # CLIENT
+    if not authorization:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing Authorization header",
+        )
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid Authorization header",
+        )
+
+    token = authorization[7:].strip()
+
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing token",
+        )
+
+    db = create_client(
+        os.environ["SUPABASE_URL"],
+        os.environ["SUPABASE_ANON_KEY"],
+    )
+
+    try:
+        response = db.auth.get_user(token)
+
+        if not response.user:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid token",
+            )
+
+        return {
+            "status": "ok",
+            "version": version,
+            "app_mode": APP_MODE,
+            "id": response.user.id,
+            "email": response.user.email,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token",
+        )
