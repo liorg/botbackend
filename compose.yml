@@ -11,8 +11,12 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
       FRONTEND_URL: ${FRONTEND_URL}
-      ENV: ${ENV}
-
+      SUPABASE_ANON_KEY: ${SUPABASE_KEY}
+      WA_ACCESS_TOKEN: ${WA_ACCESS_TOKEN}
+      WA_VERIFY_TOKEN: ${WA_VERIFY_TOKEN}
+      WA_PUBLIC_BASE: ${WA_PUBLIC_BASE}
+      WA_GRAPH_VERSION: ${WA_GRAPH_VERSION}
+      APP_MODE: ${APP_MODE}
       BACKEND_URL: https://backend.grossman.bot/api
 
       DEV_WORKER_URL: http://scenario-worker:9100
@@ -56,7 +60,7 @@ services:
     environment:
       ASPNETCORE_URLS: http://+:9100
       PORT: "9100"
-      
+
     networks:
       - scenario_net
 
