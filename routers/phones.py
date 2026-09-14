@@ -1,4 +1,3 @@
-
 """
 phones.py — FastAPI router
 Proxy between UI and .NET Agent (WhatsAppDockerManager)
@@ -26,10 +25,19 @@ AGENT_TIMEOUT = float(os.getenv("AGENT_TIMEOUT", "10"))
 HOST_HEARTBEAT_TIMEOUT_MINUTES = int(os.getenv("HOST_HEARTBEAT_TIMEOUT", "60"))
 BLOCKED_IPS = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
 
+
 class SendTextRequest(BaseModel):
-    to: str
+    # The agent expects "jid". "to" is accepted as an alias so an older
+    # caller keeps working; exactly one of them must be present.
+    jid:  Optional[str] = None
+    to:   Optional[str] = None
     text: str
-    
+
+    @property
+    def target(self) -> Optional[str]:
+        return self.jid or self.to
+
+
 class ProvisionRequest(BaseModel):
     phone_number: str
     nickname:     Optional[str] = None
@@ -164,12 +172,11 @@ async def _get_host_for_phone(db: Client, phone_id: str) -> Optional[dict]:
 
 # Columns safe to return to a browser. creds_base64 holds the Baileys session
 # and must never leave the backend — never replace this with select("*").
-
 PHONE_COLUMNS = (
-    "id, user_id, number, label, color, status, docker_status, "
-    "created_at, provider, lang, pairing_code, pairing_code_expiry, "
-    "use_pairing_code"
+    "id, user_id, number, label, color, status, host_id, "
+    "docker_url, docker_status, created_at, updated_at"
 )
+
 
 @router.get("/")
 async def list_phones(user=Depends(get_current_user), db: Client = Depends(get_supabase)):
@@ -385,10 +392,10 @@ async def send_text_message(
     if not host:
         raise HTTPException(status_code=404, detail="Phone host not found")
 
-    jid  = body.get("jid")
-    text = body.get("text")
+    jid  = body.target
+    text = body.text
     if not jid or not text:
-        raise HTTPException(status_code=400, detail="jid and text are required")
+        raise HTTPException(status_code=400, detail="jid (or to) and text are required")
 
     try:
         return await _agent_post(
@@ -402,15 +409,48 @@ async def send_text_message(
         raise HTTPException(status_code=503, detail="Agent unreachable")
 
 
+class UpdatePhoneRequest(BaseModel):
+    label: Optional[str] = None
+    color: Optional[str] = None
+    lang:  Optional[str] = None
+
+
 @router.patch("/{phone_id}")
-async def update_phone(phone_id: str, body: dict, db: Client = Depends(get_supabase)):
-    result = db.table("phones").update(body).eq("id", phone_id).execute()
-    return result.data[0] if result.data else {}
+async def update_phone(
+    phone_id: str,
+    body: UpdatePhoneRequest,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    # Only the fields on the model can be written: a raw dict would let a
+    # caller set user_id or creds_base64 directly.
+    patch = body.model_dump(exclude_none=True)
+    if not patch:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    result = (
+        db.table("phones")
+        .update(patch)
+        .eq("id", phone_id)
+        .eq("user_id", user["uid"])
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Phone not found")
+    return result.data[0]
 
 
 @router.delete("/{phone_id}")
 async def delete_phone(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
-    db.table("phones").delete().eq("id", phone_id).execute()
+    result = (
+        db.table("phones")
+        .delete()
+        .eq("id", phone_id)
+        .eq("user_id", user["uid"])
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Phone not found")
     return {"ok": True}
 
 
