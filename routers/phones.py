@@ -26,7 +26,10 @@ AGENT_TIMEOUT = float(os.getenv("AGENT_TIMEOUT", "10"))
 HOST_HEARTBEAT_TIMEOUT_MINUTES = int(os.getenv("HOST_HEARTBEAT_TIMEOUT", "60"))
 BLOCKED_IPS = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
 
-
+class SendTextRequest(BaseModel):
+    to: str
+    text: str
+    
 class ProvisionRequest(BaseModel):
     phone_number: str
     nickname:     Optional[str] = None
@@ -374,7 +377,7 @@ async def logout_phone(phone_id: str, user=Depends(get_current_user), db: Client
 @router.post("/{phone_id}/send/text")
 async def send_text_message(
     phone_id: str,
-    body: dict,
+    body: SendTextRequest,
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
