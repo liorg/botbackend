@@ -68,10 +68,19 @@ def _service_client() -> Client:
 
 @lru_cache(maxsize=1)
 def _auth_client() -> Client:
-    """Fallback JWT verification over the network, when no JWT secret is set."""
+    """Verify JWTs over the network. The key here is only the apikey header;
+    the user's token is what actually gets verified, so in internal mode the
+    service key works when no anon key is deployed."""
+    try:
+        key = _get_client_key()
+    except RuntimeError:
+        if APP_MODE != "internal":
+            raise
+        key = _get_service_key()
+
     return create_client(
         _get_supabase_url(),
-        _get_client_key(),
+        key,
         options=ClientOptions(
             persist_session=False,
             auto_refresh_token=False,
@@ -177,10 +186,20 @@ def _verify_remotely(token: str) -> dict:
     }
 
 
+def _token_alg(token: str) -> str | None:
+    try:
+        return jwt.get_unverified_header(token).get("alg")
+    except jwt.InvalidTokenError:
+        return None
+
+
 def _verify_user_token(token: str) -> dict:
     secret = _get_jwt_secret()
 
-    if secret:
+    # Supabase projects on the new signing keys issue ES256/RS256 tokens.
+    # The shared JWT secret cannot verify those, so only take the local
+    # path when the token really is HS256.
+    if secret and _token_alg(token) == "HS256":
         return _verify_locally(token, secret)
 
     return _verify_remotely(token)
