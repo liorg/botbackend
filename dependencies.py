@@ -219,6 +219,28 @@ def get_current_user(
 ) -> dict:
     return _verify_user_token(_extract_bearer_token(authorization))
 
+@lru_cache(maxsize=256)
+def _user_client(token: str) -> Client:
+    """CLIENT: one cached client per access token.
+
+    Never share a single client and re-auth it per request — concurrent
+    requests would overwrite each other's Authorization header and cross
+    tenants. Keyed by token, so each caller keeps its own pool; Supabase
+    tokens rotate roughly hourly and stale entries fall out by LRU.
+    """
+    db = create_client(
+        _get_supabase_url(),
+        _get_client_key(),
+        options=ClientOptions(
+            persist_session=False,
+            auto_refresh_token=False,
+        ),
+    )
+    # Do NOT pass Authorization via ClientOptions.headers: create_client
+    # overwrites it with the apikey and every query then runs as anon.
+    db.postgrest.auth(token)
+    return db
+
 
 def get_supabase(
     authorization: str | None = Header(None),
@@ -233,23 +255,10 @@ def get_supabase(
         return _service_client()
 
     try:
-        db = create_client(
-            _get_supabase_url(),
-            _get_client_key(),
-            options=ClientOptions(
-                persist_session=False,
-                auto_refresh_token=False,
-            ),
-        )
+        return _user_client(token)
     except RuntimeError as e:
         print(f"[AUTH] {e}")
         raise HTTPException(
             status_code=503,
             detail="Supabase client not configured",
         )
-
-    # Do NOT pass Authorization via ClientOptions.headers: create_client
-    # overwrites it with the apikey and every query then runs as anon.
-    db.postgrest.auth(token)
-
-    return db
