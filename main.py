@@ -19,7 +19,7 @@ from logging_config import get_logger, logging_middleware
 
 load_dotenv()
 
-version = "2.0.0.2"
+version = "2.0.0.3"
 logger = get_logger("main")
 
 BACKEND_URL = os.getenv("BACKEND_URL", "https://vid.michal-solutions.com/api").rstrip("/")
@@ -150,6 +150,8 @@ if APP_MODE == "internal":
 elif APP_MODE == "client":
     # בהתחלה רק endpoints שאתה באמת רוצה לחשוף
     app.include_router(phones.router, prefix="/api")
+    app.include_router(contacts.router, prefix="/api")
+    app.include_router(messages.router, prefix="/api")
     
 # ── Startup / Shutdown ────────────────────────────────────────
 @app.on_event("startup")
