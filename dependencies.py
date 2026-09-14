@@ -1,13 +1,17 @@
 from functools import lru_cache
-import hmac
 import os
 
+import jwt
 from fastapi import Header, HTTPException
 from supabase import Client, create_client
 from supabase.client import ClientOptions
 
 from config import APP_MODE
 
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 
 def _get_supabase_url() -> str:
     url = os.getenv("SUPABASE_URL")
@@ -19,14 +23,16 @@ def _get_supabase_url() -> str:
 
 
 def _get_client_key() -> str:
+    """anon / publishable key. Required in client mode."""
     key = (
         os.getenv("SUPABASE_PUBLISHABLE_KEY")
         or os.getenv("SUPABASE_ANON_KEY")
+        or os.getenv("SUPABASE_KEY")
     )
 
     if not key:
         raise RuntimeError(
-            "SUPABASE_PUBLISHABLE_KEY or SUPABASE_ANON_KEY is required"
+            "SUPABASE_ANON_KEY (or SUPABASE_KEY) is required in client mode"
         )
 
     return key
@@ -46,18 +52,23 @@ def _get_service_key() -> str:
     return key
 
 
+def _get_jwt_secret() -> str | None:
+    return os.getenv("SUPABASE_JWT_SECRET") or None
+
+
 # ---------------------------------------------------------------------------
-# Cached clients: one service client, one anon client for token verification.
-# Creating a client per request means a new httpx pool per request.
+# Cached clients. A client per request means a new httpx pool per request.
 # ---------------------------------------------------------------------------
 
 @lru_cache(maxsize=1)
 def _service_client() -> Client:
+    """Service role: bypasses RLS. Never leaves the backend."""
     return create_client(_get_supabase_url(), _get_service_key())
 
 
 @lru_cache(maxsize=1)
 def _auth_client() -> Client:
+    """Fallback JWT verification over the network, when no JWT secret is set."""
     return create_client(
         _get_supabase_url(),
         _get_client_key(),
@@ -67,6 +78,10 @@ def _auth_client() -> Client:
         ),
     )
 
+
+# ---------------------------------------------------------------------------
+# Token handling
+# ---------------------------------------------------------------------------
 
 def _extract_bearer_token(authorization: str | None) -> str:
     if not authorization:
@@ -92,28 +107,47 @@ def _extract_bearer_token(authorization: str | None) -> str:
     return token
 
 
-def _is_service_token(token: str) -> bool:
-    """True if the caller presented the service role key itself."""
+def _verify_locally(token: str, secret: str) -> dict:
+    """Verify the Supabase access token signature without a network call."""
     try:
-        return hmac.compare_digest(
-            token.encode("utf-8"),
-            _get_service_key().encode("utf-8"),
+        claims = jwt.decode(
+            token,
+            secret,
+            algorithms=["HS256"],
+            audience="authenticated",
         )
-    except RuntimeError:
-        # Service key not configured -> fall back to user JWT verification.
-        return False
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError as e:
+        print(f"[AUTH] Local JWT verify failed: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    uid = claims.get("sub")
+
+    if not uid:
+        raise HTTPException(status_code=401, detail="Token missing sub claim")
+
+    return {
+        "uid": str(uid),
+        "sub": str(uid),
+        "email": claims.get("email"),
+        "role": claims.get("role"),
+        "app_metadata": claims.get("app_metadata") or {},
+        "user_metadata": claims.get("user_metadata") or {},
+    }
 
 
-def _verify_user_token(token: str) -> dict:
+def _verify_remotely(token: str) -> dict:
+    """Fallback: ask Supabase to resolve the token."""
     try:
         db = _auth_client()
     except RuntimeError as e:
-        # Missing anon/publishable key: must not escape as an unhandled 500,
-        # that response bypasses CORSMiddleware and shows up as a CORS error.
-        print(f"[AUTH] Auth client unavailable: {e}")
+        # Never let a config error escape as an unhandled 500: that response
+        # is built outside CORSMiddleware and surfaces as a CORS error.
+        print(f"[AUTH] {e}")
         raise HTTPException(
             status_code=503,
-            detail="Auth client not configured (SUPABASE_ANON_KEY missing)",
+            detail="Auth client not configured",
         )
 
     try:
@@ -137,55 +171,66 @@ def _verify_user_token(token: str) -> dict:
         "uid": str(user.id),
         "sub": str(user.id),
         "email": user.email,
+        "role": getattr(user, "role", None),
+        "app_metadata": getattr(user, "app_metadata", None) or {},
+        "user_metadata": getattr(user, "user_metadata", None) or {},
     }
 
 
-def _authenticate_internal(authorization: str | None) -> dict:
-    """Internal mode: accept the service key, or a valid Supabase user JWT."""
-    token = _extract_bearer_token(authorization)
+def _verify_user_token(token: str) -> dict:
+    secret = _get_jwt_secret()
 
-    if _is_service_token(token):
-        return {
-            "uid": "service",
-            "sub": "service",
-            "email": None,
-            "internal": True,
-        }
+    if secret:
+        return _verify_locally(token, secret)
 
-    return _verify_user_token(token)
+    return _verify_remotely(token)
+
+
+# ---------------------------------------------------------------------------
+# FastAPI dependencies
+#
+# Both modes authenticate the browser's Supabase JWT. They differ only in
+# which Supabase credentials the resulting queries run under:
+#   internal -> service role, RLS bypassed
+#   client   -> the user's own token, RLS enforced
+# ---------------------------------------------------------------------------
+
+def get_current_user(
+    authorization: str | None = Header(None),
+) -> dict:
+    return _verify_user_token(_extract_bearer_token(authorization))
 
 
 def get_supabase(
     authorization: str | None = Header(None),
 ) -> Client:
-    # INTERNAL -> authenticate the caller, then hand back the service client
-    if APP_MODE == "internal":
-        _authenticate_internal(authorization)
-        return _service_client()
-
-    # CLIENT -> user JWT applied to PostgREST so RLS sees auth.uid()
     token = _extract_bearer_token(authorization)
 
-    db = create_client(
-        _get_supabase_url(),
-        _get_client_key(),
-        options=ClientOptions(
-            persist_session=False,
-            auto_refresh_token=False,
-        ),
-    )
+    # Authenticate in both modes: the service client must never be handed
+    # out to an unauthenticated caller.
+    _verify_user_token(token)
 
-    # Do NOT pass Authorization via ClientOptions.headers:
-    # create_client overwrites it with the anon key and RLS runs as anon.
+    if APP_MODE == "internal":
+        return _service_client()
+
+    try:
+        db = create_client(
+            _get_supabase_url(),
+            _get_client_key(),
+            options=ClientOptions(
+                persist_session=False,
+                auto_refresh_token=False,
+            ),
+        )
+    except RuntimeError as e:
+        print(f"[AUTH] {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Supabase client not configured",
+        )
+
+    # Do NOT pass Authorization via ClientOptions.headers: create_client
+    # overwrites it with the apikey and every query then runs as anon.
     db.postgrest.auth(token)
 
     return db
-
-
-def get_current_user(
-    authorization: str | None = Header(None),
-) -> dict:
-    if APP_MODE == "internal":
-        return _authenticate_internal(authorization)
-
-    return _verify_user_token(_extract_bearer_token(authorization))
