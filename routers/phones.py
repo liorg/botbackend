@@ -173,10 +173,10 @@ async def _get_host_for_phone(db: Client, phone_id: str) -> Optional[dict]:
 # Columns safe to return to a browser. creds_base64 holds the Baileys session
 # and must never leave the backend — never replace this with select("*").
 PHONE_COLUMNS = (
-    "id, user_id, number, label, color, status, host_id, "
-    "docker_url, docker_status, created_at, updated_at"
+    "id, user_id, number, label, color, status, docker_status, "
+    "created_at, provider, lang, pairing_code, pairing_code_expiry, "
+    "use_pairing_code"
 )
-
 
 @router.get("/")
 async def list_phones(user=Depends(get_current_user), db: Client = Depends(get_supabase)):
