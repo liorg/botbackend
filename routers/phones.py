@@ -1,3 +1,4 @@
+
 """
 phones.py — FastAPI router
 Proxy between UI and .NET Agent (WhatsAppDockerManager)
@@ -158,9 +159,22 @@ async def _get_host_for_phone(db: Client, phone_id: str) -> Optional[dict]:
 # Endpoints
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Columns safe to return to a browser. creds_base64 holds the Baileys session
+# and must never leave the backend — never replace this with select("*").
+PHONE_COLUMNS = (
+    "id, user_id, number, label, color, status, host_id, "
+    "docker_url, docker_status, created_at, updated_at"
+)
+
+
 @router.get("/")
 async def list_phones(user=Depends(get_current_user), db: Client = Depends(get_supabase)):
-    result = db.table("phones").select("*").eq("user_id", user["uid"]).execute()
+    result = (
+        db.table("phones")
+        .select(PHONE_COLUMNS)
+        .eq("user_id", user["uid"])
+        .execute()
+    )
     return result.data
 
 @internal_route(router.get("/agents/health"))
