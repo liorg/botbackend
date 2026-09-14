@@ -105,7 +105,16 @@ def _is_service_token(token: str) -> bool:
 
 
 def _verify_user_token(token: str) -> dict:
-    db = _auth_client()
+    try:
+        db = _auth_client()
+    except RuntimeError as e:
+        # Missing anon/publishable key: must not escape as an unhandled 500,
+        # that response bypasses CORSMiddleware and shows up as a CORS error.
+        print(f"[AUTH] Auth client unavailable: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Auth client not configured (SUPABASE_ANON_KEY missing)",
+        )
 
     try:
         user_response = db.auth.get_user(token)
