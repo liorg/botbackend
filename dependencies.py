@@ -92,23 +92,66 @@ def _extract_bearer_token(authorization: str | None) -> str:
     return token
 
 
-def _verify_service_token(authorization: str | None) -> None:
-    """Internal mode: the caller must present the service role key itself."""
-    token = _extract_bearer_token(authorization)
+def _is_service_token(token: str) -> bool:
+    """True if the caller presented the service role key itself."""
+    try:
+        return hmac.compare_digest(
+            token.encode("utf-8"),
+            _get_service_key().encode("utf-8"),
+        )
+    except RuntimeError:
+        # Service key not configured -> fall back to user JWT verification.
+        return False
 
-    if not hmac.compare_digest(token, _get_service_key()):
+
+def _verify_user_token(token: str) -> dict:
+    db = _auth_client()
+
+    try:
+        user_response = db.auth.get_user(token)
+    except Exception as e:
+        print(f"[AUTH] Supabase get_user failed: {type(e).__name__}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Auth backend unavailable",
+        )
+
+    if not user_response or not user_response.user:
         raise HTTPException(
             status_code=401,
-            detail="Invalid service token",
+            detail="Invalid or expired token",
         )
+
+    user = user_response.user
+
+    return {
+        "uid": str(user.id),
+        "sub": str(user.id),
+        "email": user.email,
+    }
+
+
+def _authenticate_internal(authorization: str | None) -> dict:
+    """Internal mode: accept the service key, or a valid Supabase user JWT."""
+    token = _extract_bearer_token(authorization)
+
+    if _is_service_token(token):
+        return {
+            "uid": "service",
+            "sub": "service",
+            "email": None,
+            "internal": True,
+        }
+
+    return _verify_user_token(token)
 
 
 def get_supabase(
     authorization: str | None = Header(None),
 ) -> Client:
-    # INTERNAL -> service role, but the caller still has to prove it holds it
+    # INTERNAL -> authenticate the caller, then hand back the service client
     if APP_MODE == "internal":
-        _verify_service_token(authorization)
+        _authenticate_internal(authorization)
         return _service_client()
 
     # CLIENT -> user JWT applied to PostgREST so RLS sees auth.uid()
@@ -134,39 +177,6 @@ def get_current_user(
     authorization: str | None = Header(None),
 ) -> dict:
     if APP_MODE == "internal":
-        _verify_service_token(authorization)
+        return _authenticate_internal(authorization)
 
-        return {
-            "uid": "internal",
-            "sub": "internal",
-            "email": None,
-            "internal": True,
-        }
-
-    token = _extract_bearer_token(authorization)
-
-    # Config errors must surface as 500, not 401 -> resolve before the try.
-    db = _auth_client()
-
-    try:
-        user_response = db.auth.get_user(token)
-    except Exception as e:
-        print(f"[AUTH] Supabase get_user failed: {type(e).__name__}: {e}")
-        raise HTTPException(
-            status_code=503,
-            detail="Auth backend unavailable",
-        )
-
-    if not user_response or not user_response.user:
-        raise HTTPException(
-            status_code=401,
-            detail="User not found for token",
-        )
-
-    user = user_response.user
-
-    return {
-        "uid": str(user.id),
-        "sub": str(user.id),
-        "email": user.email,
-    }
+    return _verify_user_token(_extract_bearer_token(authorization))
