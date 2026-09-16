@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from dependencies import get_supabase, get_current_user
 from supabase import Client
@@ -302,28 +302,28 @@ def _expand(row: dict) -> dict:
 # ══════════════════════════════════════════════════════════════════════════
 class TestSendReq(BaseModel):
     """to = מספר או jid מלא. params ריק → נלקחות הדוגמאות מהתבנית."""
-    to:     str
-    params: Optional[dict[str, list[str]]] = None
+    to: str = Field(..., description="Recipient number or full JID.")
+    params: Optional[dict[str, list[str]]] = Field(None, description="Values per part: { header: [...], body: [...] }. Empty values fall back to the examples.")
 
 class TemplateCreate(BaseModel):
-    name: str
-    category: Optional[Literal["UTILITY", "MARKETING", "AUTHENTICATION"]] = "UTILITY"
-    lang: Optional[str] = None
-    content: Optional[dict[str, Any]] = None
-    examples: Optional[dict[str, Any]] = None
+    name: str = Field(..., description="Template name: lowercase letters, digits and underscores.")
+    category: Optional[Literal["UTILITY", "MARKETING", "AUTHENTICATION"]] = Field("UTILITY", description="UTILITY, MARKETING or AUTHENTICATION.")
+    lang: Optional[str] = Field(None, description="Language code, for example en_US. Defaults to the phone's language, then the user's.")
+    content: Optional[dict[str, Any]] = Field(None, description="Template parts: header, body, footer, buttons. Parameters use {{1}}, {{2}} per part.")
+    examples: Optional[dict[str, Any]] = Field(None, description="One example per parameter, per part: { header, body, header_media_url }.")
 
 
 class TemplateUpdate(BaseModel):
-    name: Optional[str] = None
-    category: Optional[Literal["UTILITY", "MARKETING", "AUTHENTICATION"]] = None
-    lang: Optional[str] = None
-    content: Optional[dict[str, Any]] = None
-    examples: Optional[dict[str, Any]] = None
+    name: Optional[str] = Field(None, description="Template name: lowercase letters, digits and underscores.")
+    category: Optional[Literal["UTILITY", "MARKETING", "AUTHENTICATION"]] = Field(None, description="UTILITY, MARKETING or AUTHENTICATION.")
+    lang: Optional[str] = Field(None, description="Language code, for example en_US.")
+    content: Optional[dict[str, Any]] = Field(None, description="Template parts. Changing them sends an approved or rejected template back to pending.")
+    examples: Optional[dict[str, Any]] = Field(None, description="One example per parameter, per part: { header, body, header_media_url }.")
 
 
 class StatusUpdate(BaseModel):
-    status: Literal["pending", "approved", "rejected", "pause"]
-    rejected_reason: Optional[str] = None
+    status: Literal["pending", "approved", "rejected", "pause"] = Field(..., description="pending, approved, rejected or pause.")
+    rejected_reason: Optional[str] = Field(None, description="Reason stored when status is rejected; cleared otherwise.")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -332,7 +332,7 @@ class StatusUpdate(BaseModel):
 
 # ── 4. endpoints — הוסף לפני delete_template ────────────────────────────────
 
-@router.post("/{template_id}/test-send")
+@router.post("/{template_id}/test-send", summary="Test-send template", description="Sends an approved template to a number, even before it is published. Missing parameters are filled from the template examples.")
 async def test_send(
     phone_id: str,
     template_id: str,
@@ -433,7 +433,7 @@ async def test_send(
     }
 
 
-@router.post("/{template_id}/approve-publish")
+@router.post("/{template_id}/approve-publish", summary="Approve and publish template", description="Baileys phones: approves and publishes in one step. Other providers: publishes a template that is already approved.")
 async def approve_and_publish(
     phone_id: str,
     template_id: str,
@@ -488,13 +488,13 @@ async def approve_and_publish(
     logger.info(f"[TPL] approve+publish {row['name']}/{row['lang']} phone={phone_id}")
     return _expand(result.data[0])
     
-@router.get("/")
+@router.get("/", summary="List templates", description="Returns the phone's templates, newest first, with optional status, lang and name filters. Page size comes from bot_config 'templates.paging'.")
 async def list_templates(
     phone_id: str,
-    page: int = 1,
-    status: Optional[str] = Query(None),
-    lang: Optional[str] = Query(None),
-    q: Optional[str] = Query(None),
+    page: int = Query(1, description="Page number, starting at 1."),
+    status: Optional[str] = Query(None, description="Filter by status."),
+    lang: Optional[str] = Query(None, description="Filter by language code."),
+    q: Optional[str] = Query(None, description="Search in the template name."),
     db: Client = Depends(get_supabase),
 ):
     page = max(1, page)
@@ -526,7 +526,7 @@ async def list_templates(
     }
 
 
-@router.get("/published")
+@router.get("/published", summary="List published templates", description="Returns approved and published templates ordered by name, for the scenario InputEditor.")
 async def list_published(phone_id: str, db: Client = Depends(get_supabase)):
     """לשימוש ה-InputEditor — רק תבניות מאושרות ומפורסמות."""
     result = (
@@ -541,7 +541,7 @@ async def list_published(phone_id: str, db: Client = Depends(get_supabase)):
     return [_expand(r) for r in (result.data or [])]
 
 
-@router.get("/{template_id}")
+@router.get("/{template_id}", summary="Get template", description="Returns one template with its parameter map and preview.")
 async def get_template(
     phone_id: str, template_id: str, db: Client = Depends(get_supabase)
 ):
@@ -558,7 +558,7 @@ async def get_template(
     return _expand(result.data[0])
 
 
-@router.post("/")
+@router.post("/", summary="Create template", description="Creates a template. On Baileys phones it is approved immediately; otherwise it starts as pending.")
 async def create_template(
     phone_id: str,
     body: TemplateCreate,
@@ -598,7 +598,7 @@ async def create_template(
     return _expand(result.data[0])
 
 
-@router.put("/{template_id}")
+@router.put("/{template_id}", summary="Update template", description="Updates an unpublished template. Changing content moves an approved or rejected template back to pending. Returns 409 when the template is published.")
 async def update_template(
     phone_id: str,
     template_id: str,
@@ -655,7 +655,7 @@ async def update_template(
     return _expand(result.data[0])
 
 
-@router.post("/{template_id}/validate")
+@router.post("/{template_id}/validate", summary="Validate template", description="Checks the template and returns { ok, issues } without changing it.")
 async def validate_template(
     phone_id: str, template_id: str, db: Client = Depends(get_supabase)
 ):
@@ -679,7 +679,7 @@ async def validate_template(
     return {"ok": not issues, "issues": issues}
 
 
-@router.patch("/{template_id}/status")
+@router.patch("/{template_id}/status", summary="Set template status", description="Sets pending, approved, rejected or pause. Any status other than approved also unpublishes the template.")
 async def set_status(
     phone_id: str,
     template_id: str,
@@ -705,7 +705,7 @@ async def set_status(
     return _expand(result.data[0])
 
 
-@router.post("/{template_id}/publish")
+@router.post("/{template_id}/publish", summary="Publish template", description="Publishes an approved template that passes validation. Returns 422 with issues otherwise.")
 async def publish_template(
     phone_id: str, template_id: str, db: Client = Depends(get_supabase)
 ):
@@ -743,7 +743,7 @@ async def publish_template(
     return _expand(result.data[0])
 
 
-@router.post("/{template_id}/unpublish")
+@router.post("/{template_id}/unpublish", summary="Unpublish template", description="Marks the template as not published.")
 async def unpublish_template(
     phone_id: str, template_id: str, db: Client = Depends(get_supabase)
 ):
@@ -759,7 +759,7 @@ async def unpublish_template(
     return _expand(result.data[0])
 
 
-@router.delete("/{template_id}")
+@router.delete("/{template_id}", summary="Delete template", description="Deletes an unpublished template. Returns 409 when the template is published.")
 async def delete_template(
     phone_id: str, template_id: str, db: Client = Depends(get_supabase)
 ):

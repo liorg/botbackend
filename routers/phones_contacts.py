@@ -9,7 +9,7 @@ router = APIRouter(prefix="/phones/{phone_id}/contacts", tags=["phone-contacts"]
 # SELECT id, name, number, avatar, is_bot FROM contacts
 # WHERE phone_id = :phone_id AND tag = 'active'
 # ORDER BY name
-@router.get("/active")
+@router.get("/active", summary="List ACTIVE contacts", description="Returns the phone's contacts whose tag is 'active', ordered by name: id, name, number, avatar, is_bot.")
 async def list_active_contacts(phone_id: str, db: Client = Depends(get_supabase)):
     result = (
         db.table("contacts")

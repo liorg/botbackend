@@ -1,8 +1,8 @@
 # routers/contacts.py
 import os
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime, timedelta, timezone
 
@@ -26,34 +26,34 @@ AGENT_TOKEN = os.getenv("AGENT_TOKEN", "secret-token-123")
 # ══════════════════════════════════════════════════════════════════════
 
 class CreateContactFromPingRequest(BaseModel):
-    phone_id: str
-    target_number: str
-    name: Optional[str] = None
-    override_contact_id: Optional[str] = None
-    lang: Optional[str] = None                   # ⬅️ אם לא נשלח — נגזר בשרת
+    phone_id: str = Field(..., description="Phone that sends the PING.")
+    target_number: str = Field(..., description="Number to PING. Non-digits are removed; 7-15 digits.")
+    name: Optional[str] = Field(None, description="Contact name. New contacts default to the number.")
+    override_contact_id: Optional[str] = Field(None, description="Existing contact to reset and PING again, instead of matching by number.")
+    lang: Optional[str] = Field(None, description="PING language. If omitted: the existing contact's language, then the phone owner's language.")  # ⬅️ אם לא נשלח — נגזר בשרת
 
 
 class SelectResponseRequest(BaseModel):
-    contact_id: str        # draft contact שנבחר (עם LID)
-    message_id: str
-    parent_contact_id: Optional[str] = None  # new contact לעדכון
+    contact_id: str = Field(..., description="Draft contact that sent the selected reply.")  # draft contact שנבחר (עם LID)
+    message_id: str = Field(..., description="Reply message whose sender LID is linked.")
+    parent_contact_id: Optional[str] = Field(None, description="Contact to activate. Defaults to contact_id.")  # new contact לעדכון
 
 
 class UpdateContactRequest(BaseModel):
-    name: Optional[str] = None
-    email: Optional[str] = None
-    tag: Optional[str] = None
-    lid: Optional[str] = None
-    lang: Optional[str] = None                   # ⬅️ ניתן לעריכה
+    name: Optional[str] = Field(None, description="Contact name.")
+    email: Optional[str] = Field(None, description="Contact email.")
+    tag: Optional[str] = Field(None, description="Contact tag, for example new, draft or active.")
+    lid: Optional[str] = Field(None, description="WhatsApp LID of the contact.")
+    lang: Optional[str] = Field(None, description="Contact language; normalized on save.")  # ⬅️ ניתן לעריכה
 
 
 class CheckPhoneResponse(BaseModel):
-    status: str
-    contact_id: Optional[str] = None
-    contact_name: Optional[str] = None
-    contact_number: Optional[str] = None
-    ping_step: Optional[str] = None
-    ping_sender_id: Optional[str] = None
+    status: str = Field(..., description="new, blocked or override.")
+    contact_id: Optional[str] = Field(None, description="Existing contact id.")
+    contact_name: Optional[str] = Field(None, description="WhatsApp name, name or number of the contact.")
+    contact_number: Optional[str] = Field(None, description="Number stored on the contact.")
+    ping_step: Optional[str] = Field(None, description="Status of the latest open PING: pending or waiting_reply.")
+    ping_sender_id: Optional[str] = Field(None, description="Id of that PING record.")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -107,10 +107,10 @@ async def _get_user_id_for_phone(db: Client, phone_id: str) -> Optional[str]:
 # check-phone
 # ══════════════════════════════════════════════════════════════════════
 
-@router.get("/contacts/check-phone", response_model=CheckPhoneResponse)
+@router.get("/contacts/check-phone", response_model=CheckPhoneResponse, summary="Check number before PING", description="Looks up a number on the phone. Returns 'new' when there is no contact, 'blocked' when the contact already has a real LID, or 'override' together with any pending PING step.")
 async def check_phone(
-    phone_id: str,
-    number: str,
+    phone_id: str = Query(..., description="Phone to search in."),
+    number: str = Query(..., description="Number to check. Non-digits are removed."),
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
@@ -187,7 +187,7 @@ async def check_phone(
 # CRUD
 # ══════════════════════════════════════════════════════════════════════
 
-@router.get("/calls/{call_id}/messages")
+@router.get("/calls/{call_id}/messages", summary="List call messages", description="Returns every message linked to the call, oldest first.")
 async def get_call_messages(
     call_id: str,
     user=Depends(get_current_user),
@@ -206,7 +206,7 @@ async def get_call_messages(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/contacts/{contact_id}/messages")
+@router.get("/contacts/{contact_id}/messages", summary="List contact messages (raw)", description="Returns every message of the contact, oldest first, as stored rows.")
 async def get_contact_messages(
     contact_id: str,
     user=Depends(get_current_user),
@@ -226,9 +226,9 @@ async def get_contact_messages(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/contacts")
+@router.get("/contacts", summary="List contacts", description="Returns the phone's contacts, most recently updated first.")
 async def list_contacts(
-    phone_id: str,
+    phone_id: str = Query(..., description="Phone whose contacts to list."),
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
@@ -249,10 +249,10 @@ async def list_contacts(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/contacts")
+@router.post("/contacts", summary="Create contact", description="Creates a contact on the phone. Body: phone, name, email, tag (default 'new'), lid, lang. Without lang the phone owner's language is used.")
 async def create_contact(
-    phone_id: str,
     body: dict,
+    phone_id: str = Query(..., description="Phone to create the contact on."),
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
@@ -281,7 +281,7 @@ async def create_contact(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/contacts/{contact_id}")
+@router.get("/contacts/{contact_id}", summary="Get contact", description="Returns a fresh copy of one contact from the database.")
 async def get_contact(
     contact_id: str,
     user=Depends(get_current_user),
@@ -310,7 +310,7 @@ async def get_contact(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.patch("/contacts/{contact_id}")
+@router.patch("/contacts/{contact_id}", summary="Update contact", description="Updates name, email, tag, lid or lang. Only the fields that are sent change.")
 async def update_contact(
     contact_id: str,
     body: UpdateContactRequest,
@@ -339,7 +339,7 @@ async def update_contact(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/contacts/{contact_id}")
+@router.delete("/contacts/{contact_id}", summary="Delete contact", description="Deletes the contact together with its messages and PING records, and unlinks drafts that pointed to it. Returns the number of deleted messages.")
 async def delete_contact(
     contact_id: str,
     user=Depends(get_current_user),
@@ -368,7 +368,7 @@ async def delete_contact(
 # PING Flow - Step 1: שלח PING
 # ══════════════════════════════════════════════════════════════════════
 
-@router.post("/contacts/create-from-ping")
+@router.post("/contacts/create-from-ping", summary="Send PING (step 1)", description="Creates, reuses or overrides the contact for a number, then sends a PING message in the contact's language through the agent. Unlinked drafts with a real LID are linked to this contact.")
 async def create_contact_from_ping(
     body: CreateContactFromPingRequest,
     user=Depends(get_current_user),
@@ -544,7 +544,7 @@ async def create_contact_from_ping(
 # PING Flow - Step 2: שלוף שיחות ממתינות
 # ══════════════════════════════════════════════════════════════════════
 
-@router.get("/contacts/outgoing-with-replies/{phone_id}")
+@router.get("/contacts/outgoing-with-replies/{phone_id}", summary="List PING replies (step 2)", description="Returns draft contacts with a valid LID that have messages from the last 24 hours, with those messages, so the user can pick the reply that answers the PING.")
 async def get_outgoing_with_replies(
     phone_id: str,
     user=Depends(get_current_user),
@@ -628,7 +628,7 @@ async def get_outgoing_with_replies(
 # PING Flow - Step 3: בחירת תגובה וקישור LID
 # ══════════════════════════════════════════════════════════════════════
 
-@router.post("/contacts/select-response")
+@router.post("/contacts/select-response", summary="Select PING reply (step 3)", description="Takes the LID from the chosen message, sets it on the target contact and tags it 'active'. Clears the LID from the draft, links remaining drafts to the contact and completes the pending PING.")
 async def select_response(
     body: SelectResponseRequest,
     user=Depends(get_current_user),
@@ -763,12 +763,12 @@ async def select_response(
 # ══════════════════════════════════════════════════════════════════════
 
 class LinkDraftRequest(BaseModel):
-    phone_id: str
-    draft_contact_id: str
-    lid: str
+    phone_id: str = Field(..., description="Phone that received the message.")
+    draft_contact_id: str = Field(..., description="Draft contact to link.")
+    lid: str = Field(..., description="LID seen on the incoming message. Bogus values are ignored.")
 
 
-@router.post("/contacts/link-draft-to-parent")
+@router.post("/contacts/link-draft-to-parent", summary="Link draft to PING contact", description="Called by the agent webhook. Links a draft contact to the contact of the latest pending PING on the phone.")
 async def link_draft_to_parent(
     body: LinkDraftRequest,
     db: Client = Depends(get_supabase),

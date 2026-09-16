@@ -7,7 +7,7 @@ import os
 import asyncio
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime, timedelta, timezone
 
@@ -29,9 +29,9 @@ BLOCKED_IPS = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
 class SendTextRequest(BaseModel):
     # The agent expects "jid". "to" is accepted as an alias so an older
     # caller keeps working; exactly one of them must be present.
-    jid:  Optional[str] = None
-    to:   Optional[str] = None
-    text: str
+    jid: Optional[str] = Field(None, description="Recipient WhatsApp JID, for example 972501234567@s.whatsapp.net.")
+    to: Optional[str] = Field(None, description="Legacy alias for jid, used only when jid is empty.")
+    text: str = Field(..., description="Message text.")
 
     @property
     def target(self) -> Optional[str]:
@@ -39,10 +39,10 @@ class SendTextRequest(BaseModel):
 
 
 class ProvisionRequest(BaseModel):
-    phone_number: str
-    nickname:     Optional[str] = None
-    tag:          Optional[str] = None    
-    use_pairing_code: Optional[bool] = None   # 22
+    phone_number: str = Field(..., description="Number to provision. Non-digits are removed; at least 7 digits.")
+    nickname: Optional[str] = Field(None, description="Nickname passed to the agent.")
+    tag: Optional[str] = Field(None, description="Tag passed to the agent.")
+    use_pairing_code: Optional[bool] = Field(None, description="Link with a pairing code instead of a QR code.")  # 22
 
 
 def _agent_headers() -> dict:
@@ -178,7 +178,7 @@ PHONE_COLUMNS = (
     "use_pairing_code"
 )
 
-@router.get("/")
+@router.get("/", summary="List my phones", description="Returns the phones owned by the current user. Session credentials are never included.")
 async def list_phones(user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     result = (
         db.table("phones")
@@ -188,7 +188,7 @@ async def list_phones(user=Depends(get_current_user), db: Client = Depends(get_s
     )
     return result.data
 
-@internal_route(router.get("/agents/health"))
+@internal_route(router.get("/agents/health", summary="Check agent hosts health", description="Internal. Health-checks every active agent host, refreshes last_heartbeat on healthy ones and returns a summary."))
 async def agents_health(user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     hosts = await _get_active_hosts(db)
     results = []
@@ -235,7 +235,7 @@ async def _ensure_seed_templates(db: Client, phone_id: str, host: dict) -> None:
         except httpx.RequestError as e:
             logger.warning(f"[TPL] seed {spec['name']} unreachable: {e}")
             
-@router.post("/provision")
+@router.post("/provision", summary="Provision phone", description="Creates a phone for the current user, or reuses the one with the same number, on a healthy agent host. Seeds the default templates and returns the QR code or pairing code used to link WhatsApp.")
 async def provision_phone(
     body: ProvisionRequest,
     user=Depends(get_current_user),
@@ -324,7 +324,7 @@ async def provision_phone(
         raise HTTPException(status_code=503, detail="Agent unreachable after 3 attempts")
 
 
-@router.get("/{phone_id}/qrcode")
+@router.get("/{phone_id}/qrcode", summary="Get QR code", description="Returns the current QR code, pairing code and connection status of the phone from its agent host.")
 async def get_qr_code(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     host = await _get_host_for_phone(db, phone_id)
     if not host:
@@ -348,7 +348,7 @@ async def get_qr_code(phone_id: str, user=Depends(get_current_user), db: Client 
 
     }
 
-@router.post("/{phone_id}/pairing-code/refresh")
+@router.post("/{phone_id}/pairing-code/refresh", summary="Refresh pairing code", description="Asks the agent host to generate a new pairing code for the phone.")
 async def refresh_pairing_code(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     host = await _get_host_for_phone(db, phone_id)
     if not host:
@@ -368,7 +368,7 @@ async def refresh_pairing_code(phone_id: str, user=Depends(get_current_user), db
         "poll_url":     data.get("pollUrl"),
     }
     
-@router.post("/{phone_id}/pause")
+@router.post("/{phone_id}/pause", summary="Pause phone", description="Pauses the phone on its agent host.")
 async def pause_phone(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     host = await _get_host_for_phone(db, phone_id)
     if not host:
@@ -381,7 +381,7 @@ async def pause_phone(phone_id: str, user=Depends(get_current_user), db: Client 
         raise HTTPException(status_code=503, detail="Agent unreachable")
 
 
-@router.post("/{phone_id}/resume")
+@router.post("/{phone_id}/resume", summary="Resume phone", description="Resumes a paused phone on its agent host.")
 async def resume_phone(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     host = await _get_host_for_phone(db, phone_id)
     if not host:
@@ -394,7 +394,7 @@ async def resume_phone(phone_id: str, user=Depends(get_current_user), db: Client
         raise HTTPException(status_code=503, detail="Agent unreachable")
 
 
-@router.post("/{phone_id}/logout")
+@router.post("/{phone_id}/logout", summary="Log out phone", description="Logs the phone out of WhatsApp on its agent host.")
 async def logout_phone(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     host = await _get_host_for_phone(db, phone_id)
     if not host:
@@ -407,7 +407,7 @@ async def logout_phone(phone_id: str, user=Depends(get_current_user), db: Client
         raise HTTPException(status_code=503, detail="Agent unreachable")
 
 
-@router.post("/{phone_id}/send/text")
+@router.post("/{phone_id}/send/text", summary="Send text message", description="Sends a WhatsApp text message from the phone through its agent host. Requires jid (or the legacy to) and text.")
 async def send_text_message(
     phone_id: str,
     body: SendTextRequest,
@@ -436,12 +436,12 @@ async def send_text_message(
 
 
 class UpdatePhoneRequest(BaseModel):
-    label: Optional[str] = None
-    color: Optional[str] = None
-    lang:  Optional[str] = None
+    label: Optional[str] = Field(None, description="Display label of the phone.")
+    color: Optional[str] = Field(None, description="Display color of the phone.")
+    lang: Optional[str] = Field(None, description="Language code of the phone.")
 
 
-@router.patch("/{phone_id}")
+@router.patch("/{phone_id}", summary="Update phone", description="Updates label, color or lang on a phone owned by the current user. No other field can be changed.")
 async def update_phone(
     phone_id: str,
     body: UpdatePhoneRequest,
@@ -466,7 +466,7 @@ async def update_phone(
     return result.data[0]
 
 
-@router.delete("/{phone_id}")
+@router.delete("/{phone_id}", summary="Delete phone", description="Deletes a phone owned by the current user.")
 async def delete_phone(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     result = (
         db.table("phones")
@@ -480,7 +480,7 @@ async def delete_phone(phone_id: str, user=Depends(get_current_user), db: Client
     return {"ok": True}
 
 
-@internal_route(router.patch("/{phone_id}/docker-status"))
+@internal_route(router.patch("/{phone_id}/docker-status", summary="Update docker status", description="Internal. Stores docker_status and docker_url reported for the phone. Body: { status, url }."))
 async def update_docker_status(phone_id: str, body: dict, db: Client = Depends(get_supabase)):
     result = db.table("phones").update({
         "docker_status": body["status"],

@@ -1,10 +1,10 @@
 # scenarios_router.py
 import json
 import asyncio
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from dependencies import get_supabase
 from supabase import Client
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, Any, Literal
 import uuid
 from routers.template_manager import validate_scenario_templates
@@ -35,39 +35,39 @@ def _get_page_size(db: Client) -> int:
 # ── Schemas ────────────────────────────────────────────────────────────────
 
 class ScenarioCreate(BaseModel):
-    contact_id: Optional[str] = None
-    name: str
-    status: Optional[str] = "draft"
-    config: Optional[dict] = {}
-    estimated_duration_minutes: Optional[str] = None
-    inter_leaf_response_time: Optional[str] = None
-    canvas: Optional[list[dict[str, Any]]] = None
-    arrow_data: Optional[dict[str, Any]] = None
-    interval: Optional[dict[str, Any]] = None
-    estimated_time: Optional[dict[str, Any]] = None
-    use_auto_calc: Optional[bool] = True
-    description: Optional[str] = None
-    bot_contact: Optional[dict[str, Any]] = None
-    event_type: Optional[Literal["trigger", "scheduler"]] = "scheduler"
-    priority: Optional[int] = 15
+    contact_id: Optional[str] = Field(None, description="Contact the scenario is bound to.")
+    name: str = Field(..., description="Scenario name.")
+    status: Optional[str] = Field("draft", description="Scenario status; new scenarios default to draft.")
+    config: Optional[dict] = Field({}, description="Raw config merged on top of the designer fields.")
+    estimated_duration_minutes: Optional[str] = Field(None, description="Estimated run time in minutes.")
+    inter_leaf_response_time: Optional[str] = Field(None, description="Response time between leaves.")
+    canvas: Optional[list[dict[str, Any]]] = Field(None, description="Designer components, stored in config.canvas.")
+    arrow_data: Optional[dict[str, Any]] = Field(None, description="Connections between components, stored in config.arrow_data.")
+    interval: Optional[dict[str, Any]] = Field(None, description="Delay between steps, for example { mins, secs }.")
+    estimated_time: Optional[dict[str, Any]] = Field(None, description="Estimated time object, stored in config.estimated_time.")
+    use_auto_calc: Optional[bool] = Field(True, description="Calculate the estimated time automatically.")
+    description: Optional[str] = Field(None, description="Scenario description, stored in config.description.")
+    bot_contact: Optional[dict[str, Any]] = Field(None, description="Bot contact details, stored in config.bot_contact.")
+    event_type: Optional[Literal["trigger", "scheduler"]] = Field("scheduler", description="trigger (starts on an incoming message) or scheduler (started by a schedule).")
+    priority: Optional[int] = Field(15, description="Match priority when several scenarios match; default 15.")
 
 
 class ScenarioUpdate(BaseModel):
-    contact_id: Optional[str] = None
-    name: Optional[str] = None
-    status: Optional[str] = None
-    config: Optional[dict] = None
-    estimated_duration_minutes: Optional[str] = None
-    inter_leaf_response_time: Optional[str] = None
-    canvas: Optional[list[dict[str, Any]]] = None
-    arrow_data: Optional[dict[str, Any]] = None
-    interval: Optional[dict[str, Any]] = None
-    estimated_time: Optional[dict[str, Any]] = None
-    use_auto_calc: Optional[bool] = None
-    description: Optional[str] = None
-    bot_contact: Optional[dict[str, Any]] = None
-    event_type: Optional[Literal["trigger", "scheduler"]] = None
-    priority: Optional[int] = None
+    contact_id: Optional[str] = Field(None, description="Contact the scenario is bound to.")
+    name: Optional[str] = Field(None, description="Scenario name.")
+    status: Optional[str] = Field(None, description="Scenario status; new scenarios default to draft.")
+    config: Optional[dict] = Field(None, description="Raw config merged on top of the designer fields.")
+    estimated_duration_minutes: Optional[str] = Field(None, description="Estimated run time in minutes.")
+    inter_leaf_response_time: Optional[str] = Field(None, description="Response time between leaves.")
+    canvas: Optional[list[dict[str, Any]]] = Field(None, description="Designer components, stored in config.canvas.")
+    arrow_data: Optional[dict[str, Any]] = Field(None, description="Connections between components, stored in config.arrow_data.")
+    interval: Optional[dict[str, Any]] = Field(None, description="Delay between steps, for example { mins, secs }.")
+    estimated_time: Optional[dict[str, Any]] = Field(None, description="Estimated time object, stored in config.estimated_time.")
+    use_auto_calc: Optional[bool] = Field(None, description="Calculate the estimated time automatically.")
+    description: Optional[str] = Field(None, description="Scenario description, stored in config.description.")
+    bot_contact: Optional[dict[str, Any]] = Field(None, description="Bot contact details, stored in config.bot_contact.")
+    event_type: Optional[Literal["trigger", "scheduler"]] = Field(None, description="trigger (starts on an incoming message) or scheduler (started by a schedule).")
+    priority: Optional[int] = Field(None, description="Match priority when several scenarios match; default 15.")
 
 
 def _merge_config(existing_config: dict, body) -> dict:
@@ -209,10 +209,10 @@ async def _run_publish_checks(row: dict, db: Client, phone_id: str) -> list[dict
 
 # ── List scenarios ─────────────────────────────────────────────────────────
 # ── List scenarios (paginated) ─────────────────────────────────────────────
-@router.get("/")
+@router.get("/", summary="List scenarios", description="Returns the phone's scenarios, newest first. Page size comes from bot_config 'scenarios.paging'.")
 async def list_scenarios(
     phone_id: str,
-    page: int = 1,
+    page: int = Query(1, description="Page number, starting at 1."),
     db: Client = Depends(get_supabase),
 ):
     page = max(1, page)
@@ -239,7 +239,7 @@ async def list_scenarios(
     }
 
 # ── List by event_type ─────────────────────────────────────────────────────
-@router.get("/by-type/{event_type}")
+@router.get("/by-type/{event_type}", summary="List active scenarios by type", description="Returns the phone's active scenarios of the given event_type (trigger or scheduler), newest first.")
 async def list_scenarios_by_type(
     phone_id: str,
     event_type: Literal["trigger", "scheduler"],
@@ -258,7 +258,7 @@ async def list_scenarios_by_type(
 
 
 # ── Get one ────────────────────────────────────────────────────────────────
-@router.get("/{scenario_id}")
+@router.get("/{scenario_id}", summary="Get scenario", description="Returns one scenario of the phone with its config fields expanded.")
 async def get_scenario(
     phone_id: str, scenario_id: str, db: Client = Depends(get_supabase)
 ):
@@ -276,7 +276,7 @@ async def get_scenario(
 
 
 # ── Create ─────────────────────────────────────────────────────────────────
-@router.post("/")
+@router.post("/", summary="Create scenario", description="Creates a scenario (draft by default). Designer fields are stored inside config.")
 async def create_scenario(
     phone_id: str, body: ScenarioCreate, db: Client = Depends(get_supabase)
 ):
@@ -302,7 +302,7 @@ async def create_scenario(
 
 
 # ── Update ─────────────────────────────────────────────────────────────────
-@router.put("/{scenario_id}")
+@router.put("/{scenario_id}", summary="Update scenario", description="Updates a scenario. Designer fields are merged into the existing config; only the fields that are sent change.")
 async def update_scenario(
     phone_id: str, scenario_id: str, body: ScenarioUpdate,
     db: Client = Depends(get_supabase)
@@ -344,7 +344,7 @@ async def update_scenario(
 
 
 # ── Publish ────────────────────────────────────────────────────────────────
-@router.post("/{scenario_id}/publish")
+@router.post("/{scenario_id}/publish", summary="Publish scenario", description="Validates components, scheduler templates and Deno code, compiles on the Worker, then sets status to active. Returns 422 with issues when a check fails.")
 async def publish_scenario(
     phone_id: str, scenario_id: str, db: Client = Depends(get_supabase)
 ):
@@ -379,7 +379,7 @@ async def publish_scenario(
 
 
 # ── Delete ─────────────────────────────────────────────────────────────────
-@router.delete("/{scenario_id}")
+@router.delete("/{scenario_id}", summary="Delete scenario", description="Deletes the scenario.")
 async def delete_scenario(
     phone_id: str, scenario_id: str, db: Client = Depends(get_supabase)
 ):

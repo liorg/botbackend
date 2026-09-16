@@ -19,7 +19,7 @@ from typing import Optional
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from supabase import Client
 
 from dependencies import get_supabase
@@ -59,25 +59,25 @@ DEFAULT_SCHEDULES_PAGE_SIZE = 20   # fallback בלבד; המקור הוא bot_co
 # ── Schemas ────────────────────────────────────────────────────────────────
 
 class ScheduleCreate(BaseModel):
-    phone_id: Optional[str] = None
-    contact_id: Optional[str] = None
-    scenario_id: Optional[str] = None
-    schedule_name: Optional[str] = None
-    schedule_type: str                      # once | cron
-    status: Optional[str] = "active"
-    run_at: Optional[str] = None            # ל-once
-    cron_expr: Optional[str] = None         # Linux cron ל-cron
+    phone_id: Optional[str] = Field(None, description="Phone that runs the scenario.")
+    contact_id: Optional[str] = Field(None, description="Overwritten from the scenario when scenario_id is set.")
+    scenario_id: Optional[str] = Field(None, description="Scenario to run. Must belong to phone_id.")
+    schedule_name: Optional[str] = Field(None, description="Display name.")
+    schedule_type: str = Field(..., description="once or cron.")  # once | cron
+    status: Optional[str] = Field("active", description="active or paused. firing, completed and error are set by the Scheduler.")
+    run_at: Optional[str] = Field(None, description="Run time for once schedules (ISO 8601).")  # ל-once
+    cron_expr: Optional[str] = Field(None, description="Linux cron expression for cron schedules, for example '30 20 * * 0,3'.")  # Linux cron ל-cron
 
 
 class ScheduleUpdate(BaseModel):
-    phone_id: Optional[str] = None
-    contact_id: Optional[str] = None
-    scenario_id: Optional[str] = None
-    schedule_name: Optional[str] = None
-    schedule_type: Optional[str] = None
-    status: Optional[str] = None
-    run_at: Optional[str] = None
-    cron_expr: Optional[str] = None
+    phone_id: Optional[str] = Field(None, description="Phone that runs the scenario.")
+    contact_id: Optional[str] = Field(None, description="Overwritten from the scenario when scenario_id is set.")
+    scenario_id: Optional[str] = Field(None, description="Scenario to run. Must belong to phone_id.")
+    schedule_name: Optional[str] = Field(None, description="Display name.")
+    schedule_type: Optional[str] = Field(None, description="once or cron.")
+    status: Optional[str] = Field(None, description="active or paused. firing, completed and error are set by the Scheduler.")
+    run_at: Optional[str] = Field(None, description="Run time for once schedules (ISO 8601).")
+    cron_expr: Optional[str] = Field(None, description="Linux cron expression for cron schedules, for example '30 20 * * 0,3'.")
 
 
 # ── Validation helpers ─────────────────────────────────────────────────────
@@ -168,11 +168,11 @@ def _resolve_scenario(
 
 # ── List ───────────────────────────────────────────────────────────────────
 
-@router.get("")
-@router.get("/")
+@router.get("", summary="List schedules", description="Legacy flat list with scenario name, last call status and running flag. The grid uses /schedules/paged.")
+@router.get("/", summary="List schedules", description="Legacy flat list with scenario name, last call status and running flag. The grid uses /schedules/paged.")
 async def list_schedules(
-    phone_id: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
+    phone_id: Optional[str] = Query(None, description="Filter by phone."),
+    status: Optional[str] = Query(None, description="Filter by status."),
     db: Client = Depends(get_supabase),
 ):
     """
@@ -192,11 +192,11 @@ async def list_schedules(
 
 
 # ⚠️ חייב להופיע לפני GET /{schedule_id}, אחרת "paged" ייתפס כ-schedule_id
-@router.get("/paged")
+@router.get("/paged", summary="List schedules (paged)", description="Returns { schedules, total, page, page_size }. Page size comes from bot_config 'schedules_page_size'.")
 async def list_schedules_paged(
-    phone_id: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
-    page: int = Query(1, ge=1),
+    phone_id: Optional[str] = Query(None, description="Filter by phone."),
+    status: Optional[str] = Query(None, description="Filter by status."),
+    page: int = Query(1, ge=1, description="Page number, starting at 1."),
     db: Client = Depends(get_supabase),
 ):
     """
@@ -225,10 +225,10 @@ async def list_schedules_paged(
 
 # ── Calls (לוג אירועים) — מדורג ────────────────────────────────────────────
 
-@router.get("/{schedule_id}/calls")
+@router.get("/{schedule_id}/calls", summary="List schedule calls", description="Returns the calls fired by the schedule, paged. Page size comes from bot_config 'schedule_log_page_size'.")
 async def schedule_calls(
     schedule_id: str,
-    page: int = Query(1, ge=1),
+    page: int = Query(1, ge=1, description="Page number, starting at 1."),
     db: Client = Depends(get_supabase),
 ):
     page_size = _log_page_size(db)
@@ -253,7 +253,7 @@ async def schedule_calls(
 # ── Drill-down: אירועי Spine לשיחה ─────────────────────────────────────────
 # חייב להיות מוגדר לפני GET /{schedule_id} — אחרת "calls" נתפס כ-id.
 
-@router.get("/calls/{call_id}/events")
+@router.get("/calls/{call_id}/events", summary="List call events", description="Returns the Spine events of a call, for drill-down.")
 async def call_events(
     call_id: str,
     db: Client = Depends(get_supabase),
@@ -268,7 +268,7 @@ async def call_events(
 
 # ── Get one ────────────────────────────────────────────────────────────────
 
-@router.get("/{schedule_id}")
+@router.get("/{schedule_id}", summary="Get schedule", description="Returns one schedule in the same shape as the list.")
 async def get_schedule(
     schedule_id: str,
     db: Client = Depends(get_supabase),
@@ -287,8 +287,8 @@ async def get_schedule(
 
 # ── Create ─────────────────────────────────────────────────────────────────
 
-@router.post("", status_code=201)
-@router.post("/", status_code=201)
+@router.post("", status_code=201, summary="Create schedule", description="Creates a schedule and computes next_run. contact_id is taken from the scenario, which must belong to the phone.")
+@router.post("/", status_code=201, summary="Create schedule", description="Creates a schedule and computes next_run. contact_id is taken from the scenario, which must belong to the phone.")
 async def create_schedule(
     body: ScheduleCreate,
     db: Client = Depends(get_supabase),
@@ -344,7 +344,7 @@ async def create_schedule(
 
 # ── Update ─────────────────────────────────────────────────────────────────
 
-@router.put("/{schedule_id}")
+@router.put("/{schedule_id}", summary="Update schedule", description="Updates a schedule. next_run is recomputed only when the timing really changes; contact_id follows the scenario.")
 async def update_schedule(
     schedule_id: str,
     body: ScheduleUpdate,
@@ -447,7 +447,7 @@ async def update_schedule(
 
 # ── Delete ─────────────────────────────────────────────────────────────────
 
-@router.delete("/{schedule_id}")
+@router.delete("/{schedule_id}", summary="Delete schedule", description="Deletes the schedule.")
 async def delete_schedule(
     schedule_id: str,
     db: Client = Depends(get_supabase),
@@ -467,7 +467,7 @@ async def delete_schedule(
 
 # ── Run now ────────────────────────────────────────────────────────────────
 
-@router.post("/{schedule_id}/run")
+@router.post("/{schedule_id}/run", summary="Run schedule now", description="Queues the schedule by setting next_run=now and status=active; the Scheduler fires it on its next tick. Returns 409 while the schedule is firing.")
 async def run_schedule_now(
     schedule_id: str,
     db: Client = Depends(get_supabase),

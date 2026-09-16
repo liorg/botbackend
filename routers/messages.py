@@ -124,11 +124,11 @@ def format_message(msg, phone_number: str = "", phone_id: str = ""):
 
 # ── Endpoints ─────────────────────────────────────────────────────────
 
-@router.get("/contact/{contact_id}")
+@router.get("/contact/{contact_id}", summary="List contact messages", description="Returns up to limit messages of the contact, oldest first, formatted for the chat view.")
 async def get_contact_messages(
     contact_id: str,
-    limit: int = Query(200, le=500),
-    phone_number: str = Query(""),
+    limit: int = Query(200, le=500, description="Maximum number of messages to return."),
+    phone_number: str = Query("", description="Bot phone number, used to tell bot messages from user messages when direction is missing."),
     db: Client = Depends(get_supabase),
 ):
     result = (
@@ -142,11 +142,11 @@ async def get_contact_messages(
     return [format_message(m, phone_number) for m in (result.data or [])]
 
 
-@router.get("/phone/{phone_id}/contact/{contact_id}")
+@router.get("/phone/{phone_id}/contact/{contact_id}", summary="List chat messages", description="Returns up to limit formatted messages between the phone and the contact, oldest first. Falls back to the contact's messages that have no phone_id.")
 async def get_messages_by_phone_and_contact(
     phone_id: str,
     contact_id: str,
-    limit: int = Query(200, le=500),
+    limit: int = Query(200, le=500, description="Maximum number of messages to return."),
     db: Client = Depends(get_supabase),
 ):
     phone_res    = db.table("phones").select("number").eq("id", phone_id).limit(1).execute()
@@ -178,10 +178,10 @@ async def get_messages_by_phone_and_contact(
     return [format_message(m, phone_number, phone_id) for m in msgs]
 
 
-@router.get("/phone/{phone_id}")
+@router.get("/phone/{phone_id}", summary="List phone messages", description="Returns up to limit formatted messages of the phone, newest first.")
 async def get_all_phone_messages(
     phone_id: str,
-    limit: int = Query(500, le=1000),
+    limit: int = Query(500, le=1000, description="Maximum number of messages to return."),
     db: Client = Depends(get_supabase),
 ):
     phone_res    = db.table("phones").select("number").eq("id", phone_id).limit(1).execute()
@@ -221,7 +221,7 @@ async def _get_agent_api_port(db: Client, phone_id: str):
         return None, None
 
 
-@router.get("/media/{phone_id}/{message_id}")
+@router.get("/media/{phone_id}/{message_id}", summary="Get message media", description="Streams the image, audio or file of a message from the agent, keeping the agent address hidden.")
 async def proxy_media(
     phone_id: str,
     message_id: str,
@@ -248,7 +248,7 @@ async def proxy_media(
     except Exception as e:
         raise HTTPException(503, f"Agent unavailable: {e}")
 
-@router.get("/phone/{phone_id}/last")
+@router.get("/phone/{phone_id}/last", summary="Last message per contact", description="Returns the last message of every contact of the phone in one call, as an object keyed by contact_id.")
 async def get_last_messages_for_phone(
     phone_id: str,
     db: Client = Depends(get_supabase),
@@ -291,14 +291,14 @@ async def get_last_messages_for_phone(
 # לא מוחק / לא משנה שום endpoint קיים
 # ══════════════════════════════════════════════════════════════════════
 
-@router.get("/phone/{phone_id}/contact/{contact_id}/page")
+@router.get("/phone/{phone_id}/contact/{contact_id}/page", summary="Get chat messages page", description="Keyset paging for a chat. No cursor returns the newest page; before_sent_at + before_id return an older page; after_sent_at returns only newer messages for polling. Returns { messages, has_more, next_cursor }.")
 async def get_messages_page(
     phone_id: str,
     contact_id: str,
-    limit: int = Query(30, le=100),
-    before_sent_at: str | None = Query(None),   # cursor לגלילה אחורה
-    before_id: str | None = Query(None),
-    after_sent_at: str | None = Query(None),    # cursor ל-polling הודעות חדשות
+    limit: int = Query(30, le=100, description="Page size."),
+    before_sent_at: str | None = Query(None, description="Cursor: return messages sent before this time."),  # cursor לגלילה אחורה
+    before_id: str | None = Query(None, description="Cursor tie-breaker: message id at before_sent_at."),
+    after_sent_at: str | None = Query(None, description="Return only messages sent after this time."),  # cursor ל-polling הודעות חדשות
     db: Client = Depends(get_supabase),
 ):
     """
