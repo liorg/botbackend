@@ -19,7 +19,7 @@ from logging_config import get_logger, logging_middleware
 
 load_dotenv()
 
-version = "2.0.0.8"
+version = "2.0.0.9"
 logger = get_logger("main")
 
 BACKEND_URL = os.getenv("BACKEND_URL", "https://vid.michal-solutions.com/api").rstrip("/")
@@ -152,7 +152,12 @@ elif APP_MODE == "client":
     app.include_router(phones.router, prefix="/api")
     app.include_router(contacts.router, prefix="/api")
     app.include_router(messages.router, prefix="/api")
-    
+    app.include_router(notifications.router, prefix="/api")
+    app.include_router(scenarios.router, prefix="/api")
+    app.include_router(schedules.router, prefix="/api")
+    app.include_router(phones_contacts.router, prefix="/api")
+    app.include_router(templates_router, prefix="/api")
+
 # ── Startup / Shutdown ────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
