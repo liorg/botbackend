@@ -899,7 +899,6 @@ def validate_scenario_templates2(
 # ══════════════════════════════════════════════════════════════════════════
 # Seed — תבנית hello_world כמו ב-WABA, נוצרת אוטומטית ב-provision
 # ══════════════════════════════════════════════════════════════════════════
-
 HELLO_WORLD_NAME = "hello_world"
 HELLO_WORLD_LANG = "en_US"
 
@@ -918,54 +917,64 @@ HELLO_WORLD_CONTENT: dict = {
 
 HELLO_WORLD_EXAMPLES: dict = {"header": [], "body": [], "header_media_url": None}
 
+# NAME_RE allows [a-z0-9_] only, so "CheckContact" is not a legal name.
+CHECK_CONTACT_NAME = "check_contact"
+CHECK_CONTACT_LANG = "en_US"
 
-def ensure_hello_world(db: Client, phone_id: str) -> Optional[dict]:
-    phone = _phone_row(db, phone_id)
-    if (phone.get("provider") or "baileys") != "baileys":
-        logger.info(f"[TPL] hello_world skipped — provider={phone.get('provider')} phone={phone_id}")
-        return None
+CHECK_CONTACT_CONTENT: dict = {
+    "header": {"format": "none", "text": ""},
+    "body": {"text": "Are you a bot?"},
+    "footer": {"text": ""},
+    "buttons": [],
+}
 
-    existing = (
+CHECK_CONTACT_EXAMPLES: dict = {"header": [], "body": [], "header_media_url": None}
+
+# Templates seeded on provision. Creation goes through the agent proxy;
+# only the existence check runs against the DB.
+SEED_TEMPLATES: list[dict] = [
+    {
+        "name":     HELLO_WORLD_NAME,
+        "lang":     HELLO_WORLD_LANG,
+        "content":  HELLO_WORLD_CONTENT,
+        "examples": HELLO_WORLD_EXAMPLES,
+        "category": "UTILITY",
+    },
+    {
+        "name":     CHECK_CONTACT_NAME,
+        "lang":     CHECK_CONTACT_LANG,
+        "content":  CHECK_CONTACT_CONTENT,
+        "examples": CHECK_CONTACT_EXAMPLES,
+        "category": "UTILITY",
+    },
+]
+
+
+def find_template(db: Client, phone_id: str, name: str, lang: str) -> Optional[dict]:
+    """DB lookup only. Returns the row if it exists, else None."""
+    result = (
         db.table("phone_templates")
         .select(_SELECT)
         .eq("phone_id", phone_id)
-        .eq("name", HELLO_WORLD_NAME)
-        .eq("lang", HELLO_WORLD_LANG)
+        .eq("name", name)
+        .eq("lang", lang)
         .limit(1)
         .execute()
     )
-    if existing.data:
-        return _expand(existing.data[0])
+    return _expand(result.data[0]) if result.data else None
 
-    content = _norm_content(HELLO_WORLD_CONTENT)
-    examples = _norm_examples(HELLO_WORLD_EXAMPLES)
 
-    issues = _validate(HELLO_WORLD_NAME, HELLO_WORLD_LANG, content, examples)
-    if issues:
-        logger.error(f"[TPL] hello_world seed invalid: {issues}")
-        return None
+def list_templates(db: Client, phone_id: str) -> list[dict]:
+    result = (
+        db.table("phone_templates")
+        .select(_SELECT)
+        .eq("phone_id", phone_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return [_expand(r) for r in (result.data or [])]
 
-    payload = {
-        "id": str(uuid.uuid4()),
-        "phone_id": phone_id,
-        "name": HELLO_WORLD_NAME,
-        "category": "UTILITY",
-        "lang": HELLO_WORLD_LANG,
-        "content": content,
-        "examples": examples,
-        "status": "approved",
-        "is_published": True,
-        "param_count": _count_params(content),
-        "provider_template_id": None,
-        "rejected_reason": None,
-        "created_at": _now(),
-        "updated_at": _now(),
-    }
 
-    result = db.table("phone_templates").insert(payload).execute()
-    if not result.data:
-        logger.error(f"[TPL] hello_world seed failed phone={phone_id}")
-        return None
-
-    logger.info(f"[TPL] seeded hello_world/en_US phone={phone_id}")
-    return _expand(result.data[0])
+def supports_templates(db: Client, phone_id: str) -> bool:
+    phone = _phone_row(db, phone_id)
+    return (phone.get("provider") or "baileys") == "baileys"
