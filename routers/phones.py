@@ -209,6 +209,32 @@ async def agents_health(user=Depends(get_current_user), db: Client = Depends(get
     }
 
 
+async def _ensure_seed_templates(db: Client, phone_id: str, host: dict) -> None:
+    """Check the DB; anything missing is created through the agent proxy."""
+    from routers.template_manager import (
+        SEED_TEMPLATES, find_template, supports_templates,
+    )
+
+    if not supports_templates(db, phone_id):
+        return
+
+    for spec in SEED_TEMPLATES:
+        if find_template(db, phone_id, spec["name"], spec["lang"]):
+            continue
+        try:
+            await _agent_post(
+                host["ip_address"],
+                f"/api/phones/{phone_id}/templates",
+                spec,
+                timeout=30,
+            )
+            logger.info(f"[TPL] seeded {spec['name']} phone={phone_id}")
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 409:
+                logger.warning(f"[TPL] seed {spec['name']} failed: {e.response.text}")
+        except httpx.RequestError as e:
+            logger.warning(f"[TPL] seed {spec['name']} unreachable: {e}")
+            
 @router.post("/provision")
 async def provision_phone(
     body: ProvisionRequest,
@@ -266,10 +292,10 @@ async def provision_phone(
 
         if phone_id:
             try:
-                from routers.template_manager import ensure_hello_world
-                ensure_hello_world(db, phone_id)
+                await _ensure_seed_templates(db, phone_id, host)
             except Exception as e:
-                logger.warning(f"[PROVISION] hello_world seed failed {phone_id}: {e}")
+                logger.warning(f"[PROVISION] template seed failed {phone_id}: {e}")
+                
 
         logger.info(
             f"[PROVISION] {'Created' if is_new else 'Reused'} phone "
@@ -286,7 +312,7 @@ async def provision_phone(
             "qr_refresh_url":  data.get("qrRefreshUrl"),
             "message":         data.get("message"),
             "host_name":       host["host_name"],
-            "pairing_code":    data.get("pairingCode"),     # ← הוסף
+            "pairing_code":    data.get("pairingCode"),     
 
         }
 
