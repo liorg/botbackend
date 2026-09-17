@@ -562,3 +562,70 @@ async def test_seed_templates(
         "passed":             sum(1 for c in checks if c["local_valid"] and c["agent"].get("ok")),
         "checks":             checks,
     }
+
+
+# ── Template seeding & diagnostics ────────────────────────────────────────
+# These paths are more specific than /{phone_id}. FastAPI matches in
+# declaration order, so never declare a POST /{phone_id} above this block.
+
+async def _create_one_seed(db: Client, phone_id: str, host: dict, name: str) -> dict:
+    """Create a single seed template through the agent, if it is missing."""
+    from routers.template_manager import SEED_TEMPLATES, find_template
+
+    spec = next((s for s in SEED_TEMPLATES if s["name"] == name), None)
+    if not spec:
+        raise HTTPException(status_code=404, detail=f"No seed template named {name}")
+
+    existing = find_template(db, phone_id, spec["name"], spec["lang"])
+    if existing:
+        return {"created": False, "reason": "already exists", "template": existing}
+
+    try:
+        data = await _agent_post(
+            host["ip_address"],
+            f"/api/phones/{phone_id}/templates",
+            spec,
+            timeout=30,
+        )
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 409:
+            return {"created": False, "reason": "agent reports duplicate"}
+        logger.error(f"[TPL] create {name} failed: {e.response.text}")
+        raise HTTPException(status_code=502, detail=f"Agent error: {e.response.text}")
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail="Agent unreachable")
+
+    logger.info(f"[TPL] created {name} phone={phone_id}")
+    return {"created": True, "agent": data}
+
+
+@internal_route(router.post(
+    "/{phone_id}/templates/hello-world",
+    summary="Create hello_world",
+    description="Internal. Creates the hello_world template through the agent if it does not exist yet.",
+))
+async def create_hello_world(
+    phone_id: str,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    host = await _get_host_for_phone(db, phone_id)
+    if not host:
+        raise HTTPException(status_code=404, detail="Phone host not found")
+    return await _create_one_seed(db, phone_id, host, "hello_world")
+
+
+@internal_route(router.post(
+    "/{phone_id}/templates/check-contact",
+    summary="Create check_contact",
+    description="Internal. Creates the check_contact template through the agent if it does not exist yet.",
+))
+async def create_check_contact(
+    phone_id: str,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    host = await _get_host_for_phone(db, phone_id)
+    if not host:
+        raise HTTPException(status_code=404, detail="Phone host not found")
+    return await _create_one_seed(db, phone_id, host, "check_contact")
