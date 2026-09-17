@@ -978,3 +978,25 @@ def list_templates(db: Client, phone_id: str) -> list[dict]:
 def supports_templates(db: Client, phone_id: str) -> bool:
     phone = _phone_row(db, phone_id)
     return (phone.get("provider") or "baileys") == "baileys"
+# PING message template. check_contact wins when it is usable; hello_world
+# is the fallback. Order matters.
+PING_TEMPLATE_PREFERENCE = (CHECK_CONTACT_NAME, HELLO_WORLD_NAME)
+
+
+def pick_ping_template(db: Client, phone_id: str) -> Optional[dict]:
+    """The template to send as the PING, or None when neither is usable."""
+    result = (
+        db.table("phone_templates")
+        .select(_SELECT)
+        .eq("phone_id", phone_id)
+        .eq("status", "approved")
+        .eq("is_published", True)
+        .in_("name", list(PING_TEMPLATE_PREFERENCE))
+        .execute()
+    )
+
+    by_name = {r["name"]: r for r in (result.data or [])}
+    for name in PING_TEMPLATE_PREFERENCE:
+        if name in by_name:
+            return _expand(by_name[name])
+    return None
