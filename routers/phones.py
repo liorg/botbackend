@@ -208,7 +208,49 @@ async def agents_health(user=Depends(get_current_user), db: Client = Depends(get
         "hosts":   results,
     }
 
+def _agent_template_payload(spec: dict) -> dict:
+    """Map a seed spec to what TemplatesController expects.
 
+    The controller reads `name` + `language`, and ToTemplateContent parses a
+    WhatsApp-style `components` array — not our nested `content` object.
+    The whole body is forwarded to the baileys container as-is.
+    """
+    c = spec["content"] or {}
+    components: list[dict] = []
+
+    header = c.get("header") or {}
+    if header.get("text") and (header.get("format") or "none") != "none":
+        components.append({
+            "type":   "HEADER",
+            "format": (header.get("format") or "text").upper(),
+            "text":   header["text"],
+        })
+
+    body = c.get("body") or {}
+    if body.get("text"):
+        components.append({"type": "BODY", "text": body["text"]})
+
+    footer = c.get("footer") or {}
+    if footer.get("text"):
+        components.append({"type": "FOOTER", "text": footer["text"]})
+
+    buttons = c.get("buttons") or []
+    if buttons:
+        components.append({
+            "type": "BUTTONS",
+            "buttons": [
+                {"type": (b.get("type") or "quick_reply").upper(), "text": b.get("text")}
+                for b in buttons
+            ],
+        })
+
+    return {
+        "name":       spec["name"],
+        "language":   spec["lang"],
+        "category":   spec.get("category", "UTILITY"),
+        "components": components,
+    }
+    
 async def _ensure_seed_templates(db: Client, phone_id: str, host: dict) -> None:
     """Check the DB; anything missing is created through the agent proxy."""
     from routers.template_manager import (
