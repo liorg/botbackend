@@ -267,7 +267,7 @@ async def _ensure_seed_templates(db: Client, phone_id: str, host: dict) -> None:
             await _agent_post(
                 host["ip_address"],
                 f"/api/phones/{phone_id}/templates",
-                spec,
+                _agent_template_payload(spec),
                 timeout=30,
             )
             logger.info(f"[TPL] seeded {spec['name']} phone={phone_id}")
@@ -540,7 +540,7 @@ async def _dry_run_template(host: dict, phone_id: str, spec: dict) -> dict:
         data = await _agent_post(
             host["ip_address"],
             f"/api/phones/{phone_id}/templates/validate",
-            spec,
+            _agent_template_payload(spec),
             timeout=20,
         )
         result["ok"] = True
@@ -626,7 +626,7 @@ async def _create_one_seed(db: Client, phone_id: str, host: dict, name: str) -> 
         data = await _agent_post(
             host["ip_address"],
             f"/api/phones/{phone_id}/templates",
-            spec,
+            _agent_template_payload(spec),
             timeout=30,
         )
     except httpx.HTTPStatusError as e:
