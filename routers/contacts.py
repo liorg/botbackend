@@ -470,16 +470,38 @@ async def create_contact_from_ping(
         if not _is_valid_ip(agent_ip):
             raise HTTPException(status_code=400, detail=f"Invalid agent IP: {agent_ip}")
 
-        agent_url = f"http://{agent_ip}:5000/api/phones/{body.phone_id}/send/ping"
+              # ── תבנית ל-PING: check_contact אם מאושרת ומפורסמת, אחרת hello_world ──
+        from routers.template_manager import pick_ping_template
+        tpl = pick_ping_template(db, body.phone_id)
 
-        # ⬅️ הודעת בדיקה מנוסחת לפי שפה — במקום אימוג'י פעמון
+        jid       = f"{clean_number}@s.whatsapp.net"
+        base_url  = f"http://{agent_ip}:5000/api/phones/{body.phone_id}/send"
         ping_text = get_ping_message(lang)
-        logger.info(f"[PING] lang={lang} contact={contact['id']}")
+
+        if tpl:
+            pm = tpl.get("params") or {}
+            ex = tpl.get("examples") or {}
+            agent_url = f"{base_url}/ping-template"
+            send_body = {
+                "jid":        jid,
+                "name":       tpl["name"],
+                "lang":       tpl["lang"],
+                "templateId": tpl["id"],
+                "params": {
+                    "header": list(ex.get("header") or [])[:len(pm.get("header") or [])],
+                    "body":   list(ex.get("body") or [])[:len(pm.get("body") or [])],
+                },
+            }
+            logger.info(f"[PING] template={tpl['name']}/{tpl['lang']} contact={contact['id']}")
+        else:
+            agent_url = f"{base_url}/ping"
+            send_body = {"jid": jid, "text": ping_text}
+            logger.info(f"[PING] plain text lang={lang} contact={contact['id']}")
 
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
                 agent_url,
-                json={"jid": f"{clean_number}@s.whatsapp.net", "text": ping_text},   # ⬅️
+                json=send_body,
                 headers={"X-Agent-Token": AGENT_TOKEN, "Content-Type": "application/json"},
             )
             response.raise_for_status()
