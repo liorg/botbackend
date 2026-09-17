@@ -487,3 +487,78 @@ async def update_docker_status(phone_id: str, body: dict, db: Client = Depends(g
         "docker_url":    body.get("url"),
     }).eq("id", phone_id).execute()
     return result.data[0] if result.data else {}
+
+
+async def _dry_run_template(host: dict, phone_id: str, spec: dict) -> dict:
+    """Send one template spec to the agent in validate-only mode."""
+    started = datetime.now(timezone.utc)
+    result = {"name": spec["name"], "lang": spec["lang"], "ok": False}
+
+    try:
+        data = await _agent_post(
+            host["ip_address"],
+            f"/api/phones/{phone_id}/templates/validate",
+            spec,
+            timeout=20,
+        )
+        result["ok"] = True
+        result["agent"] = data
+    except httpx.HTTPStatusError as e:
+        result["status_code"] = e.response.status_code
+        result["error"] = e.response.text
+    except httpx.RequestError as e:
+        result["error"] = f"{type(e).__name__}: {e}"
+
+    result["ms"] = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+    return result
+
+
+@internal_route(router.post(
+    "/{phone_id}/templates/test",
+    summary="Dry-run the seed templates",
+    description="Internal. Validates every seed template against the agent without writing anything. Run this before provision.",
+))
+async def test_seed_templates(
+    phone_id: str,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    from routers.template_manager import (
+        SEED_TEMPLATES, find_template, supports_templates,
+        _norm_content, _norm_examples, _validate,
+    )
+
+    host = await _get_host_for_phone(db, phone_id)
+    if not host:
+        raise HTTPException(status_code=404, detail="Phone host not found")
+
+    checks = []
+    for spec in SEED_TEMPLATES:
+        # Local validation first — a bad spec never reaches the agent.
+        content  = _norm_content(spec["content"])
+        examples = _norm_examples(spec["examples"])
+        issues   = _validate(spec["name"], spec["lang"], content, examples)
+
+        entry = {
+            "name":            spec["name"],
+            "lang":            spec["lang"],
+            "local_valid":     not issues,
+            "local_issues":    issues or [],
+            "already_exists":  bool(find_template(db, phone_id, spec["name"], spec["lang"])),
+        }
+
+        if issues:
+            entry["agent"] = {"skipped": "local validation failed"}
+        else:
+            entry["agent"] = await _dry_run_template(host, phone_id, spec)
+
+        checks.append(entry)
+
+    return {
+        "phone_id":           phone_id,
+        "host":               host["host_name"],
+        "supports_templates": supports_templates(db, phone_id),
+        "total":              len(checks),
+        "passed":             sum(1 for c in checks if c["local_valid"] and c["agent"].get("ok")),
+        "checks":             checks,
+    }
