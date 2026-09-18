@@ -148,6 +148,12 @@ async def _find_healthy_host(db: Client, retries: int = 3) -> Optional[dict]:
     logger.error("[AGENT] All hosts failed health check after retries")
     return None
 
+async def _agent_delete(ip: str, path: str, timeout: float = None) -> dict:
+    url = f"http://{ip}:{AGENT_PORT}{path}"
+    async with httpx.AsyncClient(timeout=timeout or AGENT_TIMEOUT) as client:
+        resp = await client.delete(url, headers=_agent_headers())
+        resp.raise_for_status()
+        return resp.json() if resp.content else {}
 
 async def _get_host_for_phone(db: Client, phone_id: str) -> Optional[dict]:
     phone_res = db.table("phones").select("host_id").eq("id", phone_id).execute()
