@@ -617,7 +617,8 @@ async def get_template(
     return _expand(result.data[0])
 
 
-@router.post("/", summary="Create template", description="Creates a template. On Baileys phones it is approved immediately; otherwise it starts as pending.")
+#@router.post("/", summary="Create template", description="Creates a template. On Baileys phones it is approved immediately; otherwise it starts as pending.")
+@router.post("/", summary="Create template", description="Creates a template as a draft, then registers it through the Manager. Status and provider id come back from the provider.")
 async def create_template(
     phone_id: str,
     body: TemplateCreate,
