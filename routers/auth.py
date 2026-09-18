@@ -1,327 +1,363 @@
+"""
+auth.py — FastAPI router
+User authentication, profile settings and avatar storage.
 
-from fastapi import APIRouter, HTTPException, Header, Depends
-from pydantic import BaseModel, EmailStr
-from supabase import create_client, Client
-import httpx
-import jwt
+Token policy
+------------
+This router does NOT mint its own JWT. Every token it returns is a real
+Supabase access token, which is exactly what dependencies._verify_user_token
+expects. The previous make_jwt() produced an HS256 token with sub=<email> and
+no "aud" claim, so it was rejected by every other router (401) — and when it
+was accepted, uid resolved to the email address.
+
+Authentication and the Supabase client both come from dependencies.py.
+Nothing in this file creates a Supabase client per request.
+"""
+
 import os
-from datetime import datetime, timedelta
-from typing import Optional
-from fastapi import UploadFile, File
-from google.cloud import storage
 import uuid
-from functools import lru_cache
-import requests
+from datetime import datetime, timezone
+from typing import Optional
+
+import httpx
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from pydantic import BaseModel, EmailStr, Field
+from supabase import Client
+
+from dependencies import (
+    get_current_user,
+    get_service_supabase,
+    get_supabase,
+)
+from google.cloud import storage
 from logging_config import get_logger
 
-GCS_BUCKET_NAME = "vid-michal-uploads"
-GCS_PUBLIC_URL = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}"
-
 logger = get_logger("auth")
+
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "vid-michal-uploads")
+GCS_PUBLIC_URL = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}"
+GCS_AVATAR_PREFIX = "avatars"
+
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://ui.michal-solutions.com")
+
+MAX_AVATAR_BYTES = 5 * 1024 * 1024
+ALLOWED_AVATAR_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+AVATAR_EXTENSIONS = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+}
+
+# Columns returned to a browser. Never replace with select("*"): the users
+# table also carries provider ids and internal billing flags.
+USER_COLUMNS = (
+    "id, email, name, mobile, lang, avatar, package_type, "
+    "created_at, updated_at"
+)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _public_db() -> Client:
+    """Service-role client for endpoints that run before a token exists."""
+    try:
+        return get_service_supabase()
+    except RuntimeError as e:
+        # A config error raised here would bypass CORSMiddleware and reach the
+        # browser as an opaque CORS failure.
+        logger.error(f"Service client unavailable: {e}")
+        raise HTTPException(status_code=503, detail="Auth backend not configured")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# GCS Helpers
+# Google Cloud Storage
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _gcs_client() -> storage.Client:
+    key_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if key_path:
+        return storage.Client.from_service_account_json(key_path)
+    return storage.Client()
+
 
 def upload_to_gcs(file_data: bytes, filename: str, content_type: str) -> str:
-    """Upload file to Google Cloud Storage and return public URL"""
+    """Upload bytes to the avatars prefix and return the public URL."""
     try:
-        key_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-        if key_path:
-            client = storage.Client.from_service_account_json(key_path)
-        else:
-            client = storage.Client()
-
-        bucket = client.bucket(GCS_BUCKET_NAME)
-        blob = bucket.blob(f"avatars/{filename}")
+        blob = _gcs_client().bucket(GCS_BUCKET_NAME).blob(
+            f"{GCS_AVATAR_PREFIX}/{filename}"
+        )
         blob.upload_from_string(file_data, content_type=content_type)
-        return f"{GCS_PUBLIC_URL}/avatars/{filename}"
+        return f"{GCS_PUBLIC_URL}/{GCS_AVATAR_PREFIX}/{filename}"
     except Exception as e:
         logger.error(f"GCS upload failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to upload image")
 
 
+def _is_gcs_avatar(url: str) -> bool:
+    return bool(url) and url.startswith(GCS_PUBLIC_URL)
+
+
 async def mirror_google_avatar_to_gcs(picture_url: str, user_id: str) -> str:
-    """
-    Download Google profile picture and re-upload to GCS.
-    Falls back to original Google URL if anything fails.
+    """Copy a Google profile picture into GCS.
+
+    Returns the GCS URL, or the original Google URL if anything fails, so a
+    storage outage never blocks a login.
     """
     if not picture_url:
         return ""
+
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(picture_url)
+
         if resp.status_code != 200:
-            logger.warning(f"Could not download Google avatar (status {resp.status_code}), using Google URL as fallback")
+            logger.warning(
+                f"Could not download Google avatar (status {resp.status_code}) — "
+                "keeping the Google URL"
+            )
             return picture_url
 
-        content_type = resp.headers.get("content-type", "image/jpeg")
-        ext = "jpg"
-        if "png" in content_type:
-            ext = "png"
-        elif "webp" in content_type:
-            ext = "webp"
-        elif "gif" in content_type:
-            ext = "gif"
-
+        content_type = resp.headers.get("content-type", "image/jpeg").split(";")[0]
+        ext = AVATAR_EXTENSIONS.get(content_type, "jpg")
         filename = f"{user_id}_google_{uuid.uuid4().hex[:8]}.{ext}"
+
         gcs_url = upload_to_gcs(resp.content, filename, content_type)
-        logger.info(f"Google avatar mirrored to GCS: {gcs_url}", extra={"user_id": user_id})
+        logger.info("Google avatar mirrored to GCS", extra={"user_id": user_id})
         return gcs_url
     except Exception as e:
-        logger.warning(f"Failed to mirror Google avatar to GCS: {e}, falling back to Google URL")
-        return picture_url  # graceful fallback
+        logger.warning(f"Failed to mirror Google avatar: {e} — keeping the Google URL")
+        return picture_url
+
+
+async def _ensure_gcs_avatar(db: Client, user_id: str, current: str, source: str) -> str:
+    """Single owner of the avatar rule, used by both /google and /settings.
+
+    A user-uploaded GCS avatar always wins. Only an empty avatar or a raw
+    Google URL is replaced, and the DB row is updated in place.
+    """
+    if _is_gcs_avatar(current):
+        return current
+    if not source:
+        return current
+
+    mirrored = await mirror_google_avatar_to_gcs(source, user_id)
+    if not _is_gcs_avatar(mirrored):
+        return current or mirrored
+
+    db.table("users").update(
+        {"avatar": mirrored, "updated_at": _now()}
+    ).eq("id", user_id).execute()
+    return mirrored
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Database Connection
-# ══════════════════════════════════════════════════════════════════════════════
-
-def get_db() -> Client:
-    """Get Supabase client with service role key for full access"""
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
-
-    if not url or not key:
-        logger.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
-        raise HTTPException(status_code=500, detail="Database configuration error")
-
-    return create_client(url, key)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# JWT Configuration
-# ══════════════════════════════════════════════════════════════════════════════
-
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_DAYS = 7
-
-
-def get_jwt_secret():
-    return os.getenv("SUPABASE_JWT_SECRET")
-
-
-def make_jwt(user_id: str, email: str) -> str:
-    """Create a JWT token for the user"""
-    jwt_secret = get_jwt_secret()
-    if not jwt_secret:
-        logger.error("JWT_SECRET not configured")
-        raise HTTPException(status_code=500, detail="JWT_SECRET not configured")
-
-    payload = {
-        "sub": email,
-        "uid": user_id,
-        "iat": datetime.utcnow(),
-        "exp": datetime.utcnow() + timedelta(days=JWT_EXPIRATION_DAYS),
-    }
-    return jwt.encode(payload, jwt_secret, algorithm=JWT_ALGORITHM)
-
-
-@lru_cache(maxsize=1)
-def get_supabase_jwks():
-    """Fetch Supabase JWKS (cached)"""
-    url = f"{os.getenv('SUPABASE_URL')}/.well-known/jwks.json"
-    try:
-        resp = requests.get(url, timeout=10)
-        return resp.json()
-    except Exception:
-        return None
-
-
-def decode_jwt(token: str) -> dict:
-    """Decode and validate a JWT token — tries Supabase first, falls back to custom HS256"""
-    # Option 1: Supabase verification (UI tokens)
-    try:
-        db = get_db()
-        user_response = db.auth.get_user(token)
-        if user_response and user_response.user:
-            logger.info("Token verified with Supabase", extra={"action": "token_verified_supabase"})
-            user = user_response.user
-            return {"uid": user.id, "sub": user.email, "email": user.email}
-    except Exception as e:
-        logger.warning(f"Supabase token verification failed: {e}")
-
-    # Option 2: Custom HS256 fallback (Postman / service tokens)
-    logger.info("Falling back to custom JWT verification", extra={"action": "token_verify_fallback"})
-    jwt_secret = get_jwt_secret()
-    if jwt_secret:
-        try:
-            payload = jwt.decode(token, jwt_secret, algorithms=["HS256"])
-            logger.info("Token verified with custom JWT", extra={"action": "token_verified_custom"})
-            return payload
-        except jwt.ExpiredSignatureError:
-            raise HTTPException(status_code=401, detail="Token expired")
-        except jwt.InvalidTokenError:
-            pass
-
-    raise HTTPException(status_code=401, detail="Invalid token")
-
-
-def get_current_user(authorization: str = Header(None)) -> dict:
-    """Dependency to get current user from JWT token"""
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing authorization header")
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid authorization format")
-    token = authorization.replace("Bearer ", "")
-    return decode_jwt(token)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Request Models
+# Models
 # ══════════════════════════════════════════════════════════════════════════════
 
 class GoogleTokenRequest(BaseModel):
-    token: str
+    token: str = Field(
+        ...,
+        description=(
+            "Google OIDC ID token from the client. This is the id_token, not "
+            "an OAuth access token — Supabase verifies its signature."
+        ),
+    )
+    nonce: Optional[str] = Field(
+        None,
+        description="Raw nonce, required only when the ID token was requested with one.",
+    )
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
+    email: EmailStr = Field(..., description="Registered email address.")
+    password: str = Field(..., min_length=6, description="Account password.")
 
 
 class SignupRequest(BaseModel):
-    email: EmailStr
-    password: str
+    email: EmailStr = Field(..., description="Email address to register.")
+    password: str = Field(..., min_length=6, description="Password, at least 6 characters.")
+    name: Optional[str] = Field(None, max_length=120, description="Display name.")
+    lang: str = Field("he", max_length=5, description="UI language code, for example he or en.")
 
 
 class ForgotPasswordRequest(BaseModel):
-    email: EmailStr
+    email: EmailStr = Field(..., description="Email address to send reset instructions to.")
 
 
 class UpdateSettingsRequest(BaseModel):
-    full_name: Optional[str] = None
-    mobile: Optional[str] = None
-    lang: Optional[str] = None
-    avatar: Optional[str] = None
-    package_type: Optional[str] = None
+    # Two fields are deliberately absent:
+    #   package_type — a billing field; accepting it let any caller upgrade
+    #                  their own plan with a PUT.
+    #   avatar       — writable only through POST /auth/avatar, so the stored
+    #                  URL is always one this backend uploaded to GCS and never
+    #                  an arbitrary URL supplied by the client.
+    full_name: Optional[str] = Field(None, max_length=120, description="Display name.")
+    mobile: Optional[str] = Field(None, max_length=32, description="Mobile number.")
+    lang: Optional[str] = Field(None, max_length=5, description="UI language code.")
+
+
+class UserPublic(BaseModel):
+    id: str = Field(..., description="Supabase user id.")
+    email: Optional[str] = Field(None, description="Email address.")
+    name: str = Field("", description="Display name.")
+    avatar: str = Field("", description="Avatar URL, always a GCS URL once mirrored.")
+    lang: str = Field("he", description="UI language code.")
+
+
+class TokenResponse(BaseModel):
+    access_token: str = Field(..., description="Supabase access token. Send as: Authorization: Bearer <token>.")
+    refresh_token: Optional[str] = Field(None, description="Supabase refresh token.")
+    token_type: str = Field("bearer", description="Always bearer.")
+    expires_in: Optional[int] = Field(None, description="Seconds until the access token expires.")
+    user: UserPublic = Field(..., description="The authenticated user.")
+
+
+class SettingsResponse(BaseModel):
+    id: str = Field(..., description="Supabase user id.")
+    email: Optional[str] = Field(None, description="Email address.")
+    full_name: str = Field("", description="Display name. Mirrors name, kept for the existing UI.")
+    name: str = Field("", description="Display name.")
+    mobile: str = Field("", description="Mobile number.")
+    lang: str = Field("he", description="UI language code.")
+    avatar: str = Field("", description="Avatar URL.")
+    package_type: str = Field("basic", description="Billing plan. Read-only on this API.")
+    created_at: Optional[str] = Field(None, description="Row creation timestamp, ISO 8601.")
+    updated_at: Optional[str] = Field(None, description="Last update timestamp, ISO 8601.")
+
+
+class UpdateSettingsResponse(BaseModel):
+    message: str = Field(..., description="Human-readable result.")
+    updated: dict = Field(default_factory=dict, description="Fields that were written.")
+
+
+class AvatarUploadResponse(BaseModel):
+    message: str = Field(..., description="Human-readable result.")
+    avatar_url: str = Field(..., description="Public GCS URL of the stored avatar.")
+
+
+class MessageResponse(BaseModel):
+    message: str = Field(..., description="Human-readable result.")
+
+
+class MeResponse(BaseModel):
+    uid: str = Field(..., description="Supabase user id taken from the verified token.")
+    email: Optional[str] = Field(None, description="Email claim from the token.")
+    role: Optional[str] = Field(None, description="Supabase role claim.")
+
+
+class HealthResponse(BaseModel):
+    status: str = Field(..., description="Always ok when the router is reachable.")
+    service: str = Field(..., description="Service name.")
+    timestamp: str = Field(..., description="Server time, ISO 8601 UTC.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Auth Endpoints
+# Helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-@router.post("/google")
+def _session_response(session, user, row: dict) -> TokenResponse:
+    return TokenResponse(
+        access_token=session.access_token,
+        refresh_token=getattr(session, "refresh_token", None),
+        expires_in=getattr(session, "expires_in", None),
+        user=UserPublic(
+            id=str(user.id),
+            email=user.email,
+            name=row.get("name") or "",
+            avatar=row.get("avatar") or "",
+            lang=row.get("lang") or "he",
+        ),
+    )
+
+
+def _upsert_user_row(db: Client, user, name: Optional[str] = None) -> dict:
+    """Keep the users row in sync with Supabase Auth on every sign-in.
+
+    name is written only when it carries a value: the previous version passed
+    an empty string on every login and wiped names already stored.
+    """
+    payload = {
+        "id": str(user.id),
+        "email": user.email,
+        "last_login": _now(),
+    }
+    if name:
+        payload["name"] = name
+
+    db.table("users").upsert(payload, on_conflict="id").execute()
+
+    result = db.table("users").select(USER_COLUMNS).eq("id", str(user.id)).execute()
+    return result.data[0] if result.data else {}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Authentication endpoints
+#
+# The browser signs in through supabase-js and never calls these. They exist
+# for service clients and for Postman, and they return the same Supabase token
+# the browser holds, so both paths authenticate identically everywhere else.
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.post(
+    "/google",
+    response_model=TokenResponse,
+    summary="Sign in with a Google ID token",
+    description=(
+        "Exchanges a Google OIDC ID token for a Supabase session, creates the "
+        "users row on first sign-in and mirrors the Google profile picture to "
+        "GCS. A user-uploaded avatar is never overwritten."
+    ),
+)
 async def google_auth(request: GoogleTokenRequest):
-    """Login/Signup via Google OAuth — avatar is always mirrored to GCS"""
-    logger.info("Google auth attempt", extra={"action": "google_auth_start"})
+    db = _public_db()
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            "https://www.googleapis.com/oauth2/v3/userinfo",
-            headers={"Authorization": f"Bearer {request.token}"},
-        )
+    credentials = {"provider": "google", "token": request.token}
+    if request.nonce:
+        credentials["nonce"] = request.nonce
 
-    if resp.status_code != 200:
-        logger.warning("Google token verification failed", extra={
-            "action": "google_auth_failed",
-            "status_code": resp.status_code,
-        })
+    try:
+        result = db.auth.sign_in_with_id_token(credentials)
+    except Exception as e:
+        logger.warning(f"Google sign-in failed: {e}", extra={"action": "google_auth_failed"})
         raise HTTPException(status_code=401, detail="Invalid Google token")
 
-    info = resp.json()
-    email = info.get("email")
-    google_id = info.get("sub")
-    name = info.get("name", "")
-    picture = info.get("picture", "")
+    if not result.user or not result.session:
+        raise HTTPException(status_code=401, detail="Invalid Google token")
 
-    logger.info(f"Google auth for: {email}", extra={"action": "google_auth", "email": email})
+    user = result.user
+    meta = user.user_metadata or {}
 
-    db = get_db()
-    existing = db.table("users").select("*").eq("email", email).execute()
+    row = _upsert_user_row(db, user, meta.get("full_name") or meta.get("name"))
+    row["avatar"] = await _ensure_gcs_avatar(
+        db,
+        str(user.id),
+        row.get("avatar") or "",
+        meta.get("avatar_url") or meta.get("picture") or "",
+    )
 
-    if existing.data:
-        # ── Existing user ──────────────────────────────────────────────────
-        user_row = existing.data[0]
-        current_avatar = user_row.get("avatar", "")
-
-        logger.info(f"DEBUG avatar in DB: '{current_avatar}'")
-        logger.info(f"DEBUG picture from Google: '{picture}'")
-        logger.info(f"DEBUG is_google: {'googleusercontent.com' in current_avatar}")
-        logger.info(f"DEBUG is_gcs: {'storage.googleapis.com/vid-michal-uploads' in current_avatar}")
-
-        update_payload = {
-            "last_login": datetime.utcnow().isoformat(),
-            "google_id": google_id,
-        }
-
-        # Only fill avatar if the user has none (user-set avatar takes full priority)
-        current_avatar = user_row.get("avatar", "")
-        is_google_url = "googleusercontent.com" in current_avatar or "lh3.google" in current_avatar
-
-        is_gcs_url = "storage.googleapis.com/vid-michal-uploads" in current_avatar
-
-        if not current_avatar or (is_google_url and not is_gcs_url):
-             gcs_avatar = await mirror_google_avatar_to_gcs(picture, str(user_row["id"]))
-             if gcs_avatar and gcs_avatar != picture:
-                update_payload["avatar"] = gcs_avatar
-
-        db.table("users").update(update_payload).eq("id", user_row["id"]).execute()
-
-        # Re-fetch to get the latest avatar value
-        refreshed = db.table("users").select("*").eq("id", user_row["id"]).execute()
-        user_row = refreshed.data[0] if refreshed.data else user_row
-
-        logger.info("Google login successful", extra={
-            "action": "google_login_success",
-            "user_id": str(user_row["id"]),
-            "email": email,
-        })
-
-    else:
-        # ── New user — mirror Google avatar to GCS before insert ───────────
-        gcs_avatar = await mirror_google_avatar_to_gcs(picture, "new")
-
-        result = db.table("users").insert({
-            "email": email,
-            "name": name,
-            "google_id": google_id,
-            "avatar": gcs_avatar,          # ← always GCS URL, never raw Google URL
-            "lang": "he",
-            "package_type": "basic",
-            "created_at": datetime.utcnow().isoformat(),
-        }).execute()
-
-        if not result.data:
-            logger.error(f"Failed to create user: {email}")
-            raise HTTPException(status_code=500, detail="Failed to create user")
-
-        user_row = result.data[0]
-
-        # If we used "new" as placeholder user_id, re-upload with real id
-        if picture and gcs_avatar == picture:
-            # fallback was used, try again with real id
-            real_gcs = await mirror_google_avatar_to_gcs(picture, str(user_row["id"]))
-            if real_gcs and real_gcs != picture:
-                db.table("users").update({"avatar": real_gcs}).eq("id", user_row["id"]).execute()
-                user_row["avatar"] = real_gcs
-
-        logger.info("New Google user created", extra={
-            "action": "google_signup_success",
-            "user_id": str(user_row["id"]),
-            "email": email,
-        })
-
-    return {
-        "access_token": make_jwt(str(user_row["id"]), user_row["email"]),
-        "user": {
-            "id": str(user_row["id"]),
-            "email": user_row["email"],
-            "name": user_row.get("name", ""),
-            "avatar": user_row.get("avatar", ""),
-            "lang": user_row.get("lang", "he"),
-        },
-    }
+    logger.info("Google login successful", extra={
+        "action": "google_login_success",
+        "user_id": str(user.id),
+    })
+    return _session_response(result.session, user, row)
 
 
-@router.post("/login")
+@router.post(
+    "/login",
+    response_model=TokenResponse,
+    summary="Sign in with email and password",
+    description=(
+        "Signs in through Supabase Auth and returns the Supabase access token. "
+        "Unverified email addresses are rejected with 403."
+    ),
+)
 async def login(request: LoginRequest):
-    """Login with email/password via Supabase Auth"""
-    logger.info("Login attempt", extra={"action": "login_attempt", "email": request.email})
-
-    db = get_db()
+    db = _public_db()
 
     try:
         result = db.auth.sign_in_with_password({
@@ -329,70 +365,57 @@ async def login(request: LoginRequest):
             "password": request.password,
         })
     except Exception:
-        logger.warning("Login failed - invalid credentials", extra={
+        logger.warning("Login failed", extra={
             "action": "login_failed",
-            "email": request.email,
             "reason": "invalid_credentials",
         })
         raise HTTPException(status_code=401, detail="אימייל או סיסמה שגויים")
 
-    if not result.user:
+    if not result.user or not result.session:
         raise HTTPException(status_code=401, detail="אימייל או סיסמה שגויים")
 
     if not result.user.email_confirmed_at:
         logger.warning("Unverified email login attempt", extra={
             "action": "login_failed",
-            "email": request.email,
             "reason": "email_not_verified",
         })
         raise HTTPException(status_code=403, detail="יש לאמת את המייל לפני הכניסה")
 
-    user = result.user
-    user_meta = user.user_metadata or {}
-    name = user_meta.get("full_name", "")
-
-    db.table("users").upsert({
-        "id": user.id,
-        "email": user.email,
-        "name": name,
-        "last_login": datetime.utcnow().isoformat(),
-    }, on_conflict="id").execute()
+    meta = result.user.user_metadata or {}
+    row = _upsert_user_row(db, result.user, meta.get("full_name"))
 
     logger.info("Login successful", extra={
         "action": "login_success",
-        "user_id": user.id,
-        "email": request.email,
+        "user_id": str(result.user.id),
     })
-
-    return {
-        "access_token": make_jwt(user.id, user.email),
-        "user": {"id": user.id, "email": user.email, "name": name},
-    }
+    return _session_response(result.session, result.user, row)
 
 
-@router.post("/signup")
+@router.post(
+    "/signup",
+    response_model=MessageResponse,
+    summary="Register a new account",
+    description=(
+        "Creates a Supabase Auth user and sends the verification email. The "
+        "users row is created by the DB trigger when one exists, otherwise here."
+    ),
+)
 async def signup(request: SignupRequest):
-    """Signup with email/password"""
-    logger.info("Signup attempt", extra={"action": "signup_attempt", "email": request.email})
-
-    db = get_db()
+    db = _public_db()
 
     try:
         result = db.auth.sign_up({
             "email": request.email,
             "password": request.password,
             "options": {
-                "email_redirect_to": f"{os.getenv('FRONTEND_URL', 'https://ui.michal-solutions.com')}/login"
+                "email_redirect_to": f"{FRONTEND_URL}/login",
+                "data": {"full_name": request.name or "", "lang": request.lang},
             },
         })
     except Exception as e:
-        error_msg = str(e).lower()
-        if "already registered" in error_msg or "already exists" in error_msg:
-            logger.warning("Signup failed - email exists", extra={
-                "action": "signup_failed",
-                "email": request.email,
-                "reason": "email_exists",
-            })
+        message = str(e).lower()
+        if "already registered" in message or "already exists" in message:
+            logger.warning("Signup failed — email exists", extra={"action": "signup_failed"})
             raise HTTPException(status_code=400, detail="האימייל כבר רשום במערכת")
         logger.error(f"Signup error: {e}", extra={"action": "signup_error"})
         raise HTTPException(status_code=400, detail="הרשמה נכשלה")
@@ -402,220 +425,216 @@ async def signup(request: SignupRequest):
 
     try:
         db.table("users").insert({
-            "id": result.user.id,
+            "id": str(result.user.id),
             "email": result.user.email,
-            "name": "",
-            "lang": "he",
+            "name": request.name or "",
+            "lang": request.lang,
             "package_type": "basic",
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": _now(),
         }).execute()
     except Exception as e:
-        logger.debug(f"User row creation skipped (trigger may exist): {e}")
+        logger.debug(f"User row insert skipped, a trigger probably created it: {e}")
 
     logger.info("Signup successful", extra={
         "action": "signup_success",
-        "user_id": result.user.id,
-        "email": request.email,
+        "user_id": str(result.user.id),
     })
+    return MessageResponse(message="נשלח מייל אימות — בדוק את תיבת הדואר שלך ואשר את הכתובת")
 
-    return {"message": "נשלח מייל אימות — בדוק את תיבת הדואר שלך ואשר את הכתובת"}
 
-
-@router.post("/forgot-password")
+@router.post(
+    "/forgot-password",
+    response_model=MessageResponse,
+    summary="Request a password reset email",
+    description=(
+        "Always returns the same message whether or not the address exists, so "
+        "the endpoint cannot be used to enumerate registered users."
+    ),
+)
 async def forgot_password(request: ForgotPasswordRequest):
-    """Send password reset email"""
-    logger.info("Password reset request", extra={
-        "action": "password_reset_request",
-        "email": request.email,
-    })
-
-    db = get_db()
+    db = _public_db()
 
     try:
         db.auth.reset_password_email(
             request.email,
-            options={
-                "redirect_to": f"{os.getenv('FRONTEND_URL', 'https://ui.michal-solutions.com')}/reset-password"
-            },
+            options={"redirect_to": f"{FRONTEND_URL}/reset-password"},
         )
     except Exception as e:
-        logger.debug(f"Password reset error (may be okay): {e}")
+        logger.debug(f"Password reset error, reported as success by design: {e}")
 
-    return {"message": "אם האימייל קיים במערכת — נשלחו הוראות איפוס"}
+    return MessageResponse(message="אם האימייל קיים במערכת — נשלחו הוראות איפוס")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Settings Endpoints
+# Settings
 # ══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/settings")
-async def get_settings(current_user: dict = Depends(get_current_user)):
-    user_id = current_user.get("uid")
-    db = get_db()
+@router.get(
+    "/settings",
+    response_model=SettingsResponse,
+    summary="Get my profile settings",
+    description=(
+        "Returns the profile of the authenticated user. If no avatar is stored "
+        "yet, the Google picture from the auth metadata is mirrored to GCS and "
+        "saved on the way out."
+    ),
+)
+async def get_settings(
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    user_id = user["uid"]
 
     try:
-        result = db.table("users").select("*").eq("id", user_id).execute()
+        result = db.table("users").select(USER_COLUMNS).eq("id", user_id).execute()
     except Exception as e:
+        logger.error(f"Failed to load settings: {e}", extra={"user_id": user_id})
         raise HTTPException(status_code=500, detail="שגיאה בטעינת הגדרות")
 
     if not result.data:
         raise HTTPException(status_code=404, detail="משתמש לא נמצא")
 
-    user = result.data[0]
-    
-    # ── אם avatar ריק — נסה לשלוף מ-Supabase Auth metadata ──────────────
-    avatar = user.get("avatar") or ""
+    row = result.data[0]
+    avatar = row.get("avatar") or ""
+
     if not avatar:
-        try:
-            auth_user = db.auth.admin.get_user_by_id(user_id)
-            meta = auth_user.user.user_metadata or {} if auth_user.user else {}
-            google_picture = meta.get("avatar_url") or meta.get("picture") or ""
-            if google_picture:
-                # מיד mirror ל-GCS ושמור ב-DB
-                gcs_url = await mirror_google_avatar_to_gcs(google_picture, user_id)
-                if gcs_url:
-                    db.table("users").update({
-                        "avatar": gcs_url,
-                        "updated_at": datetime.utcnow().isoformat()
-                    }).eq("id", user_id).execute()
-                    avatar = gcs_url
-        except Exception as e:
-            logger.warning(f"Could not fetch auth metadata for avatar: {e}")
+        meta = user.get("user_metadata") or {}
+        source = meta.get("avatar_url") or meta.get("picture") or ""
+        avatar = await _ensure_gcs_avatar(db, user_id, avatar, source)
 
-    return {
-        "id": user.get("id"),
-        "email": user.get("email"),
-        "full_name": user.get("name") or "",
-        "name": user.get("name") or "",
-        "mobile": user.get("mobile") or "",
-        "lang": user.get("lang") or "he",
-        "avatar": avatar,
-        "package_type": user.get("package_type") or "basic",
-        "created_at": user.get("created_at"),
-        "updated_at": user.get("updated_at"),
-    }
+    return SettingsResponse(
+        id=str(row.get("id")),
+        email=row.get("email"),
+        full_name=row.get("name") or "",
+        name=row.get("name") or "",
+        mobile=row.get("mobile") or "",
+        lang=row.get("lang") or "he",
+        avatar=avatar,
+        package_type=row.get("package_type") or "basic",
+        created_at=row.get("created_at"),
+        updated_at=row.get("updated_at"),
+    )
 
-@router.put("/settings")
+
+@router.put(
+    "/settings",
+    response_model=UpdateSettingsResponse,
+    summary="Update my profile settings",
+    description=(
+        "Updates name, mobile or language for the authenticated user. The "
+        "avatar is set through POST /auth/avatar, and package_type is a "
+        "billing field that cannot be changed through this API."
+    ),
+)
 async def update_settings(
-    request: UpdateSettingsRequest,
-    current_user: dict = Depends(get_current_user),
+    body: UpdateSettingsRequest,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
 ):
-    """Update user settings"""
-    user_id = current_user.get("uid")
-    logger.info("Update settings start", extra={
-        "action": "update_settings_start",
-        "user_id": user_id,
-    })
+    user_id = user["uid"]
 
-    db = get_db()
+    # Built from the model, never from a raw dict: a raw body would let a
+    # caller write id, package_type or any other column directly.
+    patch = body.model_dump(exclude_none=True)
+    if "full_name" in patch:
+        patch["name"] = patch.pop("full_name")
 
-    update_data = {}
-    if request.full_name is not None:
-        update_data["name"] = request.full_name
-    if request.mobile is not None:
-        update_data["mobile"] = request.mobile
-    if request.lang is not None:
-        update_data["lang"] = request.lang
-    if request.avatar is not None:
-        update_data["avatar"] = request.avatar
-    if request.package_type is not None:
-        update_data["package_type"] = request.package_type
+    if not patch:
+        return UpdateSettingsResponse(message="אין שינויים לעדכון", updated={})
 
-    if not update_data:
-        return {"message": "אין שינויים לעדכון", "updated": {}}
-
-    update_data["updated_at"] = datetime.utcnow().isoformat()
+    patch["updated_at"] = _now()
 
     try:
-        result = db.table("users").update(update_data).eq("id", user_id).execute()
-
-        # FIX: Supabase may return empty data on update even when successful;
-        # treat empty result as success unless an exception was raised.
-        logger.info("Settings updated", extra={
-            "action": "update_settings_success",
-            "user_id": user_id,
-            "fields": list(update_data.keys()),
-        })
-
-        return {"message": "ההגדרות עודכנו בהצלחה", "updated": update_data}
-    except HTTPException:
-        raise
+        db.table("users").update(patch).eq("id", user_id).execute()
     except Exception as e:
         logger.error(f"Failed to update settings: {e}", extra={"user_id": user_id})
         raise HTTPException(status_code=500, detail="שגיאה בעדכון ההגדרות")
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Avatar Upload
-# ══════════════════════════════════════════════════════════════════════════════
-
-@router.post("/avatar")
-async def upload_avatar(
-    file: UploadFile = File(...),
-    current_user: dict = Depends(get_current_user),
-):
-    """Upload avatar image to GCS and update user record"""
-    user_id = current_user.get("uid")
-    logger.info("Avatar upload start", extra={
-        "action": "avatar_upload_start",
+    # Supabase returns an empty data array on update when the row is unchanged,
+    # so an empty result is not an error here.
+    logger.info("Settings updated", extra={
+        "action": "update_settings_success",
         "user_id": user_id,
-        "file_name": file.filename,
-        "content_type": file.content_type,
+        "fields": list(patch.keys()),
     })
+    return UpdateSettingsResponse(message="ההגדרות עודכנו בהצלחה", updated=patch)
 
-    allowed_types = ["image/jpeg", "image/png", "image/gif", "image/webp"]
-    if file.content_type not in allowed_types:
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Avatar
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.post(
+    "/avatar",
+    response_model=AvatarUploadResponse,
+    summary="Upload my avatar",
+    description=(
+        "Stores a JPG, PNG, GIF or WebP image of up to 5 MB in GCS and writes "
+        "the resulting URL to the user row."
+    ),
+)
+async def upload_avatar(
+    file: UploadFile = File(..., description="Image file, 5 MB maximum."),
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    user_id = user["uid"]
+
+    if file.content_type not in ALLOWED_AVATAR_TYPES:
         raise HTTPException(
             status_code=400,
             detail="סוג קובץ לא נתמך. השתמש ב-JPG, PNG, GIF או WebP",
         )
 
     contents = await file.read()
-    if len(contents) > 5 * 1024 * 1024:
+    if len(contents) > MAX_AVATAR_BYTES:
         raise HTTPException(status_code=400, detail="הקובץ גדול מדי. מקסימום 5MB")
 
-    ext = file.filename.split(".")[-1] if "." in file.filename else "jpg"
-    unique_filename = f"{user_id}_{uuid.uuid4().hex[:8]}.{ext}"
+    ext = AVATAR_EXTENSIONS.get(file.content_type, "jpg")
+    avatar_url = upload_to_gcs(
+        contents,
+        f"{user_id}_{uuid.uuid4().hex[:8]}.{ext}",
+        file.content_type,
+    )
 
-    avatar_url = upload_to_gcs(contents, unique_filename, file.content_type)
-
-    db = get_db()
     try:
-        db.table("users").update({
-            "avatar": avatar_url,
-            "updated_at": datetime.utcnow().isoformat(),
-        }).eq("id", user_id).execute()
-
-        logger.info("Avatar uploaded successfully", extra={
-            "action": "avatar_upload_success",
-            "user_id": user_id,
-            "avatar_url": avatar_url,
-        })
-
-        return {"message": "התמונה הועלתה בהצלחה", "avatar_url": avatar_url}
+        db.table("users").update(
+            {"avatar": avatar_url, "updated_at": _now()}
+        ).eq("id", user_id).execute()
     except Exception as e:
-        logger.error(f"Failed to update avatar in DB: {e}", extra={"user_id": user_id})
+        logger.error(f"Failed to store avatar URL: {e}", extra={"user_id": user_id})
         raise HTTPException(status_code=500, detail="שגיאה בשמירת התמונה")
 
+    logger.info("Avatar uploaded", extra={
+        "action": "avatar_upload_success",
+        "user_id": user_id,
+    })
+    return AvatarUploadResponse(message="התמונה הועלתה בהצלחה", avatar_url=avatar_url)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Utility Endpoints
+# Utility
 # ══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/me")
-async def get_me(current_user: dict = Depends(get_current_user)):
-    """Get current user info from JWT"""
-    return {
-        "uid": current_user.get("uid"),
-        "email": current_user.get("sub"),
-    }
+@router.get(
+    "/me",
+    response_model=MeResponse,
+    summary="Describe the current token",
+    description="Returns the identity resolved from the bearer token. Useful for debugging auth.",
+)
+async def get_me(user=Depends(get_current_user)):
+    return MeResponse(
+        uid=user["uid"],
+        email=user.get("email"),
+        role=user.get("role"),
+    )
 
 
-@router.get("/health")
+@router.get(
+    "/health",
+    response_model=HealthResponse,
+    summary="Health check",
+    description="Liveness probe for the auth router. No authentication required.",
+)
 async def health():
-    """Health check endpoint"""
-    return {
-        "status": "ok",
-        "service": "auth",
-        "timestamp": datetime.utcnow().isoformat(),
-    }
+    return HealthResponse(status="ok", service="auth", timestamp=_now())
