@@ -33,9 +33,11 @@ from supabase import Client
 from logging_config import get_logger
 import httpx
 
-from routers.phones import _get_host_for_phone, _agent_post
+#from routers.phones import _get_host_for_phone, _agent_post
 
+from urllib.parse import quote
 
+from routers.phones import _get_host_for_phone, _agent_post, _agent_delete
 logger = get_logger("templates")
 
 router = APIRouter(prefix="/phones/{phone_id}/templates", tags=["templates"])
@@ -186,6 +188,63 @@ def _count_params(content: dict) -> int:
     pm = _param_map(content)
     return len(pm["header"]) + len(pm["body"])
 
+def _to_components(content: dict, examples: Optional[dict] = None) -> list[dict]:
+    """content{header,body,footer,buttons} → components[] בפורמט WhatsApp.
+    ההפך המדויק של ToTemplateContent ב-TemplatesController."""
+    examples = examples or {}
+    comps: list[dict] = []
+
+    h   = content.get("header") or {}
+    fmt = (h.get("format") or "none").lower()
+    if fmt != "none":
+        comp = {"type": "HEADER", "format": fmt.upper()}
+        if fmt == "text":
+            comp["text"] = h.get("text") or ""
+            if examples.get("header"):
+                comp["example"] = {"header_text": list(examples["header"])}
+        comps.append(comp)
+
+    b = content.get("body") or {}
+    if b.get("text"):
+        comp = {"type": "BODY", "text": b["text"]}
+        if examples.get("body"):
+            comp["example"] = {"body_text": [list(examples["body"])]}
+        comps.append(comp)
+
+    f = content.get("footer") or {}
+    if f.get("text"):
+        comps.append({"type": "FOOTER", "text": f["text"]})
+
+    buttons = content.get("buttons") or []
+    if buttons:
+        comps.append({"type": "BUTTONS", "buttons": [
+            {"type": (btn.get("type") or "quick_reply").upper(), "text": btn.get("text") or ""}
+            for btn in buttons
+        ]})
+
+    return comps
+
+
+async def _register_with_manager(db: Client, phone_id: str, name: str, lang: str,
+                                 category: str, content: dict, examples: dict) -> dict:
+    """POST /api/phones/{id}/templates ב-Manager — הוא קורא ל-whatsapp-single
+    ומעדכן את הטיוטה (provider_template_id + status)."""
+    host = await _get_host_for_phone(db, phone_id)
+    if not host:
+        raise HTTPException(status_code=503, detail="No agent available for this phone")
+
+    payload = {
+        "name":       name,
+        "language":   lang,
+        "category":   category,
+        "components": _to_components(content, examples),
+    }
+    try:
+        return await _agent_post(host["ip_address"], f"/api/phones/{phone_id}/templates", payload, timeout=25)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text[:400])
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Manager unreachable: {e}")
 
 def _iss(code: str, **params) -> dict:
     """בעיה אחת בפורמט שהלקוח מתרגם."""
