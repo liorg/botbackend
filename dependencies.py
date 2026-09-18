@@ -88,6 +88,16 @@ def _auth_client() -> Client:
     )
 
 
+def get_service_supabase() -> Client:
+    """Public accessor for the cached service-role client.
+
+    For callers that run before a bearer token exists (login, signup, OAuth
+    exchange, password reset). Never hand this client to an authenticated
+    request path: use get_supabase, which honours APP_MODE and RLS.
+    """
+    return _service_client()
+
+
 # ---------------------------------------------------------------------------
 # Token handling
 # ---------------------------------------------------------------------------
