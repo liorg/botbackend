@@ -634,27 +634,41 @@ async def create_template(
     # baileys אין גורם חיצוני שמאשר — התבנית נכנסת ישר כמאושרת.
     status = "approved" if phone.get("provider") == "baileys" else "pending"
 
+    # נכנס תמיד כטיוטה — ה-Manager הוא שקובע status ו-provider_template_id
     payload = {
-        "id": str(uuid.uuid4()),
-        "phone_id": phone_id,
-        "name": name,
-        "category": body.category or "UTILITY",
-        "lang": lang,
-        "content": content,
-        "examples": examples,
-        "status": status,
+        "id":           str(uuid.uuid4()),
+        "phone_id":     phone_id,
+        "name":         name,
+        "category":     body.category or "UTILITY",
+        "lang":         lang,
+        "content":      content,
+        "examples":     examples,
+        "status":       "pending",
         "is_published": False,
-        "param_count": _count_params(content),
-        "created_at": _now(),
-        "updated_at": _now(),
+        "param_count":  _count_params(content),
+        "created_at":   _now(),
+        "updated_at":   _now(),
     }
 
     result = db.table("phone_templates").insert(payload).execute()
     if not result.data:
         raise HTTPException(status_code=500, detail="Failed to create template")
+    row = result.data[0]
 
-    logger.info(f"[TPL] created {name}/{lang} phone={phone_id} status={status}")
-    return _expand(result.data[0])
+    # נכשל → הטיוטה נשארת; ניסיון חוזר יזוהה ב-Manager (טיוטה בלי provider id)
+    reg = await _register_with_manager(
+        db, phone_id, name, lang, body.category or "UTILITY", content, examples
+    )
+
+    fresh = (
+        db.table("phone_templates").select(_SELECT)
+        .eq("id", row["id"]).limit(1).execute()
+    )
+    out = fresh.data[0] if fresh.data else row
+
+    logger.info(f"[TPL] created+registered {name}/{lang} phone={phone_id} "
+                f"provider_id={reg.get('id')} status={out.get('status')}")
+    return _expand(out)
 
 
 @router.put("/{template_id}", summary="Update template", description="Updates an unpublished template. Changing content moves an approved or rejected template back to pending. Returns 409 when the template is published.")
@@ -818,13 +832,13 @@ async def unpublish_template(
     return _expand(result.data[0])
 
 
-@router.delete("/{template_id}", summary="Delete template", description="Deletes an unpublished template. Returns 409 when the template is published.")
+@router.delete("/{template_id}", summary="Delete template", description="Deletes an unpublished template. Registered templates are deleted through the Manager first. Returns 409 when the template is published.")
 async def delete_template(
     phone_id: str, template_id: str, db: Client = Depends(get_supabase)
 ):
     existing = (
         db.table("phone_templates")
-        .select("is_published")
+        .select("is_published, provider_template_id, name, lang")
         .eq("id", template_id)
         .eq("phone_id", phone_id)
         .limit(1)
@@ -832,15 +846,39 @@ async def delete_template(
     )
     if not existing.data:
         raise HTTPException(status_code=404, detail="Template not found")
-    if existing.data[0].get("is_published"):
+    row = existing.data[0]
+    if row.get("is_published"):
         raise HTTPException(
             status_code=409, detail="לא ניתן למחוק תבנית מפורסמת — בטל פרסום קודם"
         )
 
+    provider_id = row.get("provider_template_id")
+
+    # טיוטה שלא נרשמה מעולם — מחיקה מקומית בלבד
+    if not provider_id:
+        db.table("phone_templates").delete().eq("id", template_id).eq("phone_id", phone_id).execute()
+        logger.info(f"[TPL] deleted draft {row.get('name')}/{row.get('lang')} phone={phone_id}")
+        return {"ok": True, "provider_deleted": False}
+
+    host = await _get_host_for_phone(db, phone_id)
+    if not host:
+        raise HTTPException(status_code=503, detail="No agent available for this phone")
+
+    path = f"/api/phones/{phone_id}/templates/{quote(str(provider_id), safe='')}"
+    try:
+        await _agent_delete(host["ip_address"], path, timeout=25)
+        logger.info(f"[TPL] deleted {row.get('name')}/{row.get('lang')} "
+                    f"phone={phone_id} provider_id={provider_id}")
+        return {"ok": True, "provider_deleted": True}   # ה-Manager כבר מחק את הרשומה
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code != 404:
+            raise HTTPException(status_code=e.response.status_code, detail=e.response.text[:400])
+        logger.warning(f"[TPL] Manager 404 for provider_id={provider_id} — מנקה מקומית")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Manager unreachable: {e}")
+
     db.table("phone_templates").delete().eq("id", template_id).eq("phone_id", phone_id).execute()
-    return {"ok": True}
-
-
+    return {"ok": True, "provider_deleted": False}
 # ══════════════════════════════════════════════════════════════════════════
 # ולידציית קישור תבנית לתרחיש — נקרא מ-scenarios.py בעת publish (סעיף 11)
 # ══════════════════════════════════════════════════════════════════════════
