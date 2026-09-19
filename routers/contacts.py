@@ -470,7 +470,7 @@ async def create_contact_from_ping(
         if not _is_valid_ip(agent_ip):
             raise HTTPException(status_code=400, detail=f"Invalid agent IP: {agent_ip}")
 
-              # ── תבנית ל-PING: check_contact אם מאושרת ומפורסמת, אחרת hello_world ──
+        # ── תבנית ל-PING: check_contact → hello_world → כל תבנית מאושרת ──
         from routers.template_manager import pick_ping_template
         tpl = pick_ping_template(db, body.phone_id)
 
@@ -478,10 +478,22 @@ async def create_contact_from_ping(
         base_url  = f"http://{agent_ip}:5000/api/phones/{body.phone_id}/send"
         ping_text = get_ping_message(lang)
 
+        async def _send(url: str, payload: dict) -> dict:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    url,
+                    json=payload,
+                    headers={"X-Agent-Token": AGENT_TOKEN, "Content-Type": "application/json"},
+                )
+                response.raise_for_status()
+                return response.json()
+
+        ping_result = None
+
+        # התבנית היא ניסיון ראשון בלבד — דחייה של ה-HostAgent לא מפילה את ה-PING
         if tpl:
             pm = tpl.get("params") or {}
             ex = tpl.get("examples") or {}
-            agent_url = f"{base_url}/ping-template"
             send_body = {
                 "jid":        jid,
                 "name":       tpl["name"],
@@ -492,20 +504,19 @@ async def create_contact_from_ping(
                     "body":   list(ex.get("body") or [])[:len(pm.get("body") or [])],
                 },
             }
-            logger.info(f"[PING] template={tpl['name']}/{tpl['lang']} contact={contact['id']}")
-        else:
-            agent_url = f"{base_url}/ping"
-            send_body = {"jid": jid, "text": ping_text}
-            logger.info(f"[PING] plain text lang={lang} contact={contact['id']}")
+            try:
+                ping_result = await _send(f"{base_url}/ping-template", send_body)
+                logger.info(f"[PING] template={tpl['name']}/{tpl['lang']} contact={contact['id']}")
+            except httpx.HTTPStatusError as e:
+                logger.warning(
+                    f"[PING] template {tpl['name']}/{tpl['lang']} rejected "
+                    f"({e.response.status_code}): {e.response.text[:300]} — נופל לטקסט"
+                )
+                tpl = None
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
-                agent_url,
-                json=send_body,
-                headers={"X-Agent-Token": AGENT_TOKEN, "Content-Type": "application/json"},
-            )
-            response.raise_for_status()
-            ping_result = response.json()
+        if ping_result is None:
+            ping_result = await _send(f"{base_url}/ping", {"jid": jid, "text": ping_text})
+            logger.info(f"[PING] plain text lang={lang} contact={contact['id']}")
 
         ping_sender_id      = ping_result.get("pingSenderId")
         whatsapp_message_id = ping_result.get("messageId")
