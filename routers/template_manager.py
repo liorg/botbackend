@@ -492,18 +492,14 @@ async def test_send(
     }
 
 
-@router.post("/{template_id}/approve-publish", summary="Approve and publish template", description="Baileys phones: approves and publishes in one step. Other providers: publishes a template that is already approved.")
+@router.post("/{template_id}/approve-publish", summary="Approve and publish template", description="Publishes a template that the provider has already approved.")
 async def approve_and_publish(
     phone_id: str,
     template_id: str,
     db: Client = Depends(get_supabase),
 ):
-    """
-    baileys: אין גורם חיצוני שמאשר, אז אישור ופרסום הם פעולה אחת.
-    whatsapp: האישור מגיע מ-Meta — כאן רק מפרסמים תבנית שכבר approved.
-    """
-    phone = _phone_row(db, phone_id)
-    provider = phone.get("provider") or "baileys"
+    """האישור מגיע מהספק בלבד — כאן רק מפרסמים תבנית שכבר approved."""
+    _phone_row(db, phone_id)   # 404 לטלפון לא קיים
 
     existing = (
         db.table("phone_templates")
@@ -524,8 +520,7 @@ async def approve_and_publish(
         row.get("examples") or {},
     )
 
-    # רק ב-baileys מותר לקפוץ מעל האישור.
-    if provider != "baileys" and row.get("status") != "approved":
+    if row.get("status") != "approved":
         issues.append(_iss("tplErrNotApproved", status=row.get("status")))
 
     if issues:
@@ -617,7 +612,6 @@ async def get_template(
     return _expand(result.data[0])
 
 
-#@router.post("/", summary="Create template", description="Creates a template. On Baileys phones it is approved immediately; otherwise it starts as pending.")
 @router.post("/", summary="Create template", description="Creates a template as a draft, then registers it through the Manager. Status and provider id come back from the provider.")
 async def create_template(
     phone_id: str,
@@ -625,15 +619,12 @@ async def create_template(
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
-    phone = _phone_row(db, phone_id)
+    _phone_row(db, phone_id)   # 404 לטלפון לא קיים
 
     content = _norm_content(body.content)
     examples = _norm_examples(body.examples)
     lang = (body.lang or "").strip() or _default_lang(db, phone_id, user)
     name = (body.name or "").strip().lower()
-
-    # baileys אין גורם חיצוני שמאשר — התבנית נכנסת ישר כמאושרת.
-    status = "approved" if phone.get("provider") == "baileys" else "pending"
 
     # נכנס תמיד כטיוטה — ה-Manager הוא שקובע status ו-provider_template_id
     payload = {
@@ -995,25 +986,8 @@ def validate_scenario_templates2(
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# Seed — תבנית hello_world כמו ב-WABA, נוצרת אוטומטית ב-provision
+# Seed — check_contact בלבד. שאר התבניות מגיעות מהספק דרך ImportOnceAsync.
 # ══════════════════════════════════════════════════════════════════════════
-HELLO_WORLD_NAME = "hello_world"
-HELLO_WORLD_LANG = "en_US"
-
-HELLO_WORLD_CONTENT: dict = {
-    "header": {"format": "text", "text": "Hello World"},
-    "body": {
-        "text": (
-            "Welcome and congratulations!! This message demonstrates your ability "
-            "to send a WhatsApp message notification from the Cloud API, hosted by "
-            "Meta. Thank you for taking the time to test with us."
-        )
-    },
-    "footer": {"text": "WhatsApp Business Platform sample message"},
-    "buttons": [],
-}
-
-HELLO_WORLD_EXAMPLES: dict = {"header": [], "body": [], "header_media_url": None}
 
 # NAME_RE allows [a-z0-9_] only, so "CheckContact" is not a legal name.
 CHECK_CONTACT_NAME = "check_contact"
@@ -1031,13 +1005,6 @@ CHECK_CONTACT_EXAMPLES: dict = {"header": [], "body": [], "header_media_url": No
 # Templates seeded on provision. Creation goes through the agent proxy;
 # only the existence check runs against the DB.
 SEED_TEMPLATES: list[dict] = [
-    {
-        "name":     HELLO_WORLD_NAME,
-        "lang":     HELLO_WORLD_LANG,
-        "content":  HELLO_WORLD_CONTENT,
-        "examples": HELLO_WORLD_EXAMPLES,
-        "category": "UTILITY",
-    },
     {
         "name":     CHECK_CONTACT_NAME,
         "lang":     CHECK_CONTACT_LANG,
@@ -1076,25 +1043,41 @@ def list_templates(db: Client, phone_id: str) -> list[dict]:
 def supports_templates(db: Client, phone_id: str) -> bool:
     phone = _phone_row(db, phone_id)
     return (phone.get("provider") or "baileys") == "baileys"
-# PING message template. check_contact wins when it is usable; hello_world
-# is the fallback. Order matters.
+
+
+# PING message template — לפי סדר העדפה, ואז כל תבנית מאושרת.
+# check_contact הוא ה-seed; hello_world מגיע מקטלוג הספק (ImportOnceAsync).
+HELLO_WORLD_NAME = "hello_world"
 PING_TEMPLATE_PREFERENCE = (CHECK_CONTACT_NAME, HELLO_WORLD_NAME)
 
 
 def pick_ping_template(db: Client, phone_id: str) -> Optional[dict]:
-    """The template to send as the PING, or None when neither is usable."""
+    """
+    check_contact עדיף, אחריו hello_world. אם אף אחד מהם אינו קיים —
+    כל תבנית מאושרת ומפורסמת אחרת, בעדיפות לתבנית ללא פרמטרים:
+    ל-PING אין ערכים למלא בהם placeholders.
+    """
     result = (
         db.table("phone_templates")
         .select(_SELECT)
         .eq("phone_id", phone_id)
         .eq("status", "approved")
         .eq("is_published", True)
-        .in_("name", list(PING_TEMPLATE_PREFERENCE))
+        .order("name")
         .execute()
     )
 
-    by_name = {r["name"]: r for r in (result.data or [])}
+    rows = result.data or []
+    if not rows:
+        return None
+
+    by_name = {r.get("name"): r for r in rows}
     for name in PING_TEMPLATE_PREFERENCE:
         if name in by_name:
             return _expand(by_name[name])
-    return None
+
+    param_free = [r for r in rows if not (r.get("param_count") or 0)]
+    chosen = (param_free or rows)[0]
+
+    logger.info(f"[TPL] ping fallback → {chosen.get('name')}/{chosen.get('lang')} phone={phone_id}")
+    return _expand(chosen)

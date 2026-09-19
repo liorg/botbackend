@@ -648,22 +648,6 @@ async def _create_one_seed(db: Client, phone_id: str, host: dict, name: str) -> 
 
 
 @internal_route(router.post(
-    "/{phone_id}/templates/hello-world",
-    summary="Create hello_world",
-    description="Internal. Creates the hello_world template through the agent if it does not exist yet.",
-))
-async def create_hello_world(
-    phone_id: str,
-    user=Depends(get_current_user),
-    db: Client = Depends(get_supabase),
-):
-    host = await _get_host_for_phone(db, phone_id)
-    if not host:
-        raise HTTPException(status_code=404, detail="Phone host not found")
-    return await _create_one_seed(db, phone_id, host, "hello_world")
-
-
-@internal_route(router.post(
     "/{phone_id}/templates/check-contact",
     summary="Create check_contact",
     description="Internal. Creates the check_contact template through the agent if it does not exist yet.",
