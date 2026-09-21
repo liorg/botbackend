@@ -612,7 +612,7 @@ async def get_template(
     return _expand(result.data[0])
 
 
-@router.post("/", summary="Create template", description="Creates a template as a draft, then registers it through the Manager. Status and provider id come back from the provider.")
+@router.post("/", summary="Create template", description="Creates a template as a local draft only. Nothing is sent to the Manager until the template is published.")
 async def create_template(
     phone_id: str,
     body: TemplateCreate,
@@ -647,20 +647,9 @@ async def create_template(
         raise HTTPException(status_code=500, detail="Failed to create template")
     row = result.data[0]
 
-    # נכשל → הטיוטה נשארת; ניסיון חוזר יזוהה ב-Manager (טיוטה בלי provider id)
-    reg = await _register_with_manager(
-        db, phone_id, name, lang, body.category or "UTILITY", content, examples
-    )
-
-    fresh = (
-        db.table("phone_templates").select(_SELECT)
-        .eq("id", row["id"]).limit(1).execute()
-    )
-    out = fresh.data[0] if fresh.data else row
-
-    logger.info(f"[TPL] created+registered {name}/{lang} phone={phone_id} "
-                f"provider_id={reg.get('id')} status={out.get('status')}")
-    return _expand(out)
+    # שמירה בלבד — אין שליחה ל-Manager. הרישום מתבצע ב-/publish.
+    logger.info(f"[TPL] created draft {name}/{lang} phone={phone_id}")
+    return _expand(row)
 
 
 @router.put("/{template_id}", summary="Update template", description="Updates an unpublished template. Changing content moves an approved or rejected template back to pending. Returns 409 when the template is published.")
@@ -770,13 +759,13 @@ async def set_status(
     return _expand(result.data[0])
 
 
-@router.post("/{template_id}/publish", summary="Publish template", description="Publishes an approved template that passes validation. Returns 422 with issues otherwise.")
+@router.post("/{template_id}/publish", summary="Publish template", description="Validates the template, registers it through the Manager, and stores the status the provider returns. Published only when the provider approves.")
 async def publish_template(
     phone_id: str, template_id: str, db: Client = Depends(get_supabase)
 ):
     existing = (
         db.table("phone_templates")
-        .select("id, name, lang, status, content, examples")
+        .select("id, name, lang, category, status, content, examples, provider_template_id")
         .eq("id", template_id)
         .eq("phone_id", phone_id)
         .limit(1)
@@ -792,19 +781,47 @@ async def publish_template(
         row.get("content") or {},
         row.get("examples") or {},
     )
-    if row.get("status") != "approved":
-        issues.append(_iss("tplErrNotApproved", status=row.get("status")))
-
     if issues:
         raise HTTPException(status_code=422, detail={"ok": False, "issues": issues})
 
+    # השליחה ל-Manager מתבצעת כאן בלבד — לא בשמירה
+    reg = await _register_with_manager(
+        db,
+        phone_id,
+        row.get("name") or "",
+        row.get("lang") or "",
+        row.get("category") or "UTILITY",
+        row.get("content") or {},
+        row.get("examples") or {},
+    ) or {}
+
+    # מה שחוזר מה-Manager קובע status / provider id
+    status = str(reg.get("status") or "pending").lower()
+    if status not in STATUSES:
+        status = "pending"
+
+    payload: dict = {
+        "status":          status,
+        "is_published":    status == "approved",
+        "rejected_reason": (reg.get("rejected_reason") or reg.get("reason")) if status == "rejected" else None,
+        "updated_at":      _now(),
+    }
+    provider_id = reg.get("id") or reg.get("provider_template_id")
+    if provider_id:
+        payload["provider_template_id"] = str(provider_id)
+
     result = (
         db.table("phone_templates")
-        .update({"is_published": True, "updated_at": _now()})
+        .update(payload)
         .eq("id", template_id)
         .eq("phone_id", phone_id)
         .execute()
     )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    logger.info(f"[TPL] publish {row.get('name')}/{row.get('lang')} phone={phone_id} "
+                f"provider_id={provider_id} status={status}")
     return _expand(result.data[0])
 
 
