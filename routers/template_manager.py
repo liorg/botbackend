@@ -425,16 +425,10 @@ async def test_send(
         )
 
     content = row.get("content") or {}
-    issues = _validate(
-        row.get("name") or "",
-        row.get("lang") or "",
-        content,
-        row.get("examples") or {},
-    )
-    if issues:
-        raise HTTPException(status_code=422, detail={"ok": False, "issues": issues})
 
     # ── השלמת פרמטרים חסרים מהדוגמאות ─────────────────────────────────────
+    # הסדר כאן חשוב: קודם מרכיבים את הפרמטרים, ורק אז מוולידים. בשליחת
+    # בדיקה הערכים מגיעים מהבקשה, ולכן דוגמאות שמורות אינן תנאי.
     pm = _param_map(content)
     supplied = body.params or {}
     examples = row.get("examples") or {}
@@ -451,6 +445,25 @@ async def test_send(
                 v = fallback[i] if i < len(fallback) else ""
             vals.append(str(v))
         params[part] = vals
+
+    issues = _validate(
+        row.get("name") or "",
+        row.get("lang") or "",
+        content,
+        row.get("examples") or {},
+    )
+
+    # כל פרמטר קיבל ערך? אז tplErrExamples לא רלוונטי כאן. הוא כן נשאר
+    # חוסם ב-publish, שם מטא היא זו שדורשת דוגמאות.
+    all_filled = all(
+        len([v for v in params.get(part, []) if str(v).strip()]) >= len(pm[part])
+        for part in ("header", "body")
+    )
+    if all_filled:
+        issues = [i for i in issues if i.get("code") != "tplErrExamples"]
+
+    if issues:
+        raise HTTPException(status_code=422, detail={"ok": False, "issues": issues})
 
     # ── HostAgent ─────────────────────────────────────────────────────────
     host = await _get_host_for_phone(db, phone_id)
