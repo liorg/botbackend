@@ -489,6 +489,12 @@ async def create_contact_from_ping(
                 return response.json()
 
         ping_result = None
+        used_tpl    = None    # מה נבחר בפועל — חוזר ל-UI
+        tpl_error   = None    # למה לא נבחרה תבנית
+
+        if not tpl:
+            tpl_error = "pick_ping_template returned None — אין תבנית approved+is_published לטלפון"
+            logger.warning(f"[PING] {tpl_error} phone={body.phone_id}")
 
         # התבנית היא ניסיון ראשון בלבד — דחייה של ה-HostAgent לא מפילה את ה-PING
         if tpl:
@@ -506,12 +512,25 @@ async def create_contact_from_ping(
             }
             try:
                 ping_result = await _send(f"{base_url}/ping-template", send_body)
+                used_tpl = {
+                    "id":           tpl["id"],
+                    "name":         tpl["name"],
+                    "lang":         tpl["lang"],
+                    "status":       tpl.get("status"),
+                    "is_published": tpl.get("is_published"),
+                    "params":       send_body["params"],
+                }
                 logger.info(f"[PING] template={tpl['name']}/{tpl['lang']} contact={contact['id']}")
             except httpx.HTTPStatusError as e:
+                tpl_error = f"HostAgent {e.response.status_code}: {e.response.text[:300]}"
                 logger.warning(
                     f"[PING] template {tpl['name']}/{tpl['lang']} rejected "
                     f"({e.response.status_code}): {e.response.text[:300]} — נופל לטקסט"
                 )
+                tpl = None
+            except httpx.RequestError as e:
+                tpl_error = f"HostAgent unreachable: {type(e).__name__}: {e}"
+                logger.warning(f"[PING] template send unreachable: {e} — נופל לטקסט")
                 tpl = None
 
         if ping_result is None:
@@ -559,6 +578,9 @@ async def create_contact_from_ping(
             "whatsapp_message_id": whatsapp_message_id,
             "lang":                lang,          # ⬅️ ה-UI יכול להציג מה נשלח
             "ping_text":           ping_text,     # ⬅️
+            "via":                 "template" if used_tpl else "text",
+            "template":            used_tpl,      # None כשנשלח טקסט
+            "template_error":      tpl_error,     # למה לא נשלחה תבנית
             "message":             "PING sent successfully. Waiting for response...",
         }
 
