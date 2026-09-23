@@ -705,7 +705,9 @@ async def get_outgoing_with_replies(
                 .execute()
             )
             # רק הודעות שה-sender שלהן הוא LID אמיתי — הן המועמדות ל-PONG
-            ct_number = re.sub(r"\D", "", ct.get("number") or "")
+            #ct_number = re.sub(r"\D", "", ct.get("number") or "")
+
+            ct_number = "".join(ch for ch in (ct.get("number") or "") if ch.isdigit())
             msgs = [
                 m for m in (msgs_res.data or [])
                 if _is_valid_lid(m.get("sender")) and m.get("sender") != ct_number
