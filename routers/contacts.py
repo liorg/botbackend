@@ -615,11 +615,16 @@ async def get_outgoing_with_replies(
             .eq("phone_id", phone_id)
             .eq("status", "pending")
             .order("created_at", desc=True)
-            .limit(1)
+            .limit(10)
             .execute()
         )
         active_ps       = ps_res.data[0] if ps_res.data else None
         main_contact_id = active_ps.get("contact_id") if active_ps else None
+
+        # כל איש קשר שיש לו PING ממתין — גם אם הקונטיינר לא פתח לו draft
+        pending_contact_ids = [
+            ps["contact_id"] for ps in (ps_res.data or []) if ps.get("contact_id")
+        ]
 
         drafts_res = (
             db.table("contacts")
@@ -672,12 +677,68 @@ async def get_outgoing_with_replies(
                 "last_message": msgs[-1],
             }
 
+        # ── מקור 2: תשובות שנחתו ישירות על איש הקשר של ה-PING ─────────
+        # הקונטיינר לא תמיד פותח draft. כשהוא משייך את ההודעה הנכנסת
+        # ל-contact_id של ה-ping_sender, אין שורת draft ושלב 2 נשאר ריק.
+        for target_id in pending_contact_ids:
+            if target_id in contact_map:
+                continue
+
+            ct_res = (
+                db.table("contacts")
+                .select("id, number, name, lid, tag, whatsapp_name, parent_contact_id, is_connect")
+                .eq("id", target_id)
+                .limit(1)
+                .execute()
+            )
+            if not ct_res.data:
+                continue
+            ct = ct_res.data[0]
+
+            msgs_res = (
+                db.table("messages")
+                .select("*")
+                .eq("contact_id", target_id)
+                .eq("direction", True)
+                .gt("sent_at", cutoff)
+                .order("sent_at", desc=False)
+                .execute()
+            )
+            # רק הודעות שה-sender שלהן הוא LID אמיתי — הן המועמדות ל-PONG
+            ct_number = re.sub(r"\D", "", ct.get("number") or "")
+            msgs = [
+                m for m in (msgs_res.data or [])
+                if _is_valid_lid(m.get("sender")) and m.get("sender") != ct_number
+            ]
+            if not msgs:
+                continue
+
+            display_name = (
+                ct.get("whatsapp_name") or
+                ct.get("name") or
+                ct.get("lid") or
+                ct.get("number")
+            )
+
+            contact_map[target_id] = {
+                "contact": {
+                    "id":                target_id,
+                    "name":              display_name,
+                    "number":            ct["number"],
+                    "lid":               ct.get("lid"),
+                    "tag":               ct.get("tag"),
+                    # אותו contact — שלב 3 יעדכן אותו עצמו, בלי ניקוי draft
+                    "parent_contact_id": target_id,
+                },
+                "messages":     msgs,
+                "last_message": msgs[-1],
+            }
+
         return {"conversations": list(contact_map.values())}
 
     except Exception as e:
         logger.error(f"[PING] Error fetching conversations: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ══════════════════════════════════════════════════════════════════════
 # PING Flow - Step 3: בחירת תגובה וקישור LID
