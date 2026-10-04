@@ -24,7 +24,8 @@ import json
 import os
 
 import httpx
-from fastapi import APIRouter, Query, Request, Response
+
+from fastapi import APIRouter, Query, Request, Response, HTTPException
 
 from logging_config import get_logger
 
@@ -154,7 +155,10 @@ async def receive(slot: str, request: Request):
 
 
 @router.get("/sig-status")
-async def sig_status():
+async def sig_status(request: Request):
+    want = os.getenv("WA_DEBUG_TOKEN", "")
+    if not want or request.headers.get("X-Debug-Token") != want:
+        raise HTTPException(status_code=404)      # 404 ולא 403 — לא מסגירים שהוא קיים
     """
     בלי להריץ webhook: האם הסוד בכלל טעון, ומה טביעת האצבע שלו.
 
@@ -165,6 +169,7 @@ async def sig_status():
     """
     if not APP_SECRET:
         return {"loaded": False, "hint": "WA_APP_SECRET לא מוגדר"}
+    
     return {
         "loaded": True,
         "len": len(APP_SECRET),
