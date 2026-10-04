@@ -1,17 +1,28 @@
 """
-wa_override_ab.py — בדיקת override ברמת טלפון
+wa_override_ab.py — בדיקת override ברמת טלפון + **אימות ה-app secret על רטוב**
 
 שני קולטים: /wa-test/hook/a  ו-  /wa-test/hook/b
 כל אחד רושם בלוג עם התווית שלו, כך שרואים לאן Meta שלחה בפועל.
 
+מה נוסף בגרסה הזו: כל POST מחשב HMAC-SHA256 על הגוף מול `WA_APP_SECRET`
+ומשווה ל-`X-Hub-Signature-256` שמטא שלחה. **הוא לא דוחה** — רק רושם. ככה
+אפשר לוודא שהסוד נכון בלי להסתכן באיבוד הודעות.
+
+זה הדבר היחיד שמוכיח שה-app secret שלך הוא של האפליקציה שמחזיקה את המנוי.
+whqueue דוחה ב-401 על סוד שגוי, וכאן רואים את זה לפני שזה קורה שם.
+
 ENV:
   WA_ACCESS_TOKEN   טוקן Meta
+  WA_APP_SECRET     App → Settings → Basic → App Secret   ← החדש
   WA_VERIFY_TOKEN   ברירת מחדל test123
   WA_PUBLIC_BASE    למשל https://backend.grossman.bot
 """
 
-import os
+import hashlib
+import hmac
 import json
+import os
+
 import httpx
 from fastapi import APIRouter, Query, Request, Response
 
@@ -25,6 +36,43 @@ GRAPH_BASE   = f"https://graph.facebook.com/{os.getenv('WA_GRAPH_VERSION', 'v25.
 ACCESS_TOKEN = os.getenv("WA_ACCESS_TOKEN", "")
 VERIFY_TOKEN = os.getenv("WA_VERIFY_TOKEN", "test123")
 PUBLIC_BASE  = os.getenv("WA_PUBLIC_BASE", "https://backend.grossman.bot")
+APP_SECRET   = os.getenv("WA_APP_SECRET", "")
+
+# כמה POST-ים ראשונים מדפיסים את **כל** ההדרים. פעם אחת זה מלמד יותר מכל
+# תיעוד: רואים בדיוק מה מטא שולחת, ומה היא לא (אין verify token, אין טוקן).
+_dump_left = int(os.getenv("WA_DUMP_HEADERS", "3"))
+
+
+# ══════════════════════════════════════════════ אימות החתימה
+
+def check_signature(raw: bytes, header: str) -> dict:
+    """
+    מחזיר את הפירוט, לא רק true/false — כי כשזה נכשל רוצים לדעת למה.
+
+    שים לב ש-raw הוא הבייטים **המדויקים** שהגיעו. כל re-serialize של ה-JSON
+    (אפילו כזה שמייצר JSON תקין לגמרי) משנה את החתימה.
+    """
+    out = {"ok": False, "why": "", "bytes": len(raw)}
+
+    if not APP_SECRET:
+        out["why"] = "WA_APP_SECRET לא מוגדר"
+        return out
+    if not header:
+        out["why"] = "אין הדר X-Hub-Signature-256 — זה לא webhook של מטא"
+        return out
+    if not header.startswith("sha256="):
+        out["why"] = f"פורמט הדר לא צפוי: {header[:20]}"
+        return out
+
+    theirs = header.split("=", 1)[1].strip()
+    mine   = hmac.new(APP_SECRET.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+
+    out["ok"] = hmac.compare_digest(mine, theirs)
+    if not out["ok"]:
+        # שמונה תווים מכל אחד מספיקים להשוואה ולא חושפים כלום — החתימה
+        # ממילא פומבית, והסוד לא נגזר ממנה.
+        out["why"] = f"לא תואם · שלהם={theirs[:8]}… שלי={mine[:8]}…"
+    return out
 
 
 # ══════════════════════════════════════════════ שני הקולטים
@@ -49,8 +97,24 @@ async def verify(
 @router.post("/hook/{slot}")
 async def receive(slot: str, request: Request):
     """מקבל הודעות וסטטוסים. רק לוג — לא מפעיל שום פייפליין."""
+    global _dump_left
     tag = slot.upper()
     raw = await request.body()
+
+    # ── החתימה, לפני כל השאר ─────────────────────────────────────────────
+    sig = check_signature(raw, request.headers.get("X-Hub-Signature-256", ""))
+    if sig["ok"]:
+        logger.info(f"[{tag}] SIG ✓ תואם · {sig['bytes']} בתים")
+    else:
+        logger.error(f"[{tag}] SIG ✗ {sig['why']} · {sig['bytes']} בתים")
+
+    if _dump_left > 0:
+        _dump_left -= 1
+        hdrs = {k: v for k, v in request.headers.items()
+                if k.lower() not in ("cookie", "authorization")}
+        logger.info(f"[{tag}] HEADERS {json.dumps(hdrs, ensure_ascii=False)}")
+        logger.info(f"[{tag}] QUERY   {dict(request.query_params)}")
+
     try:
         data = json.loads(raw)
     except Exception:
@@ -87,6 +151,27 @@ async def receive(slot: str, request: Request):
                 logger.info(f"[{tag}] OTHER field={field} value={json.dumps(v, ensure_ascii=False)[:500]}")
 
     return {"ok": True}
+
+
+@router.get("/sig-status")
+async def sig_status():
+    """
+    בלי להריץ webhook: האם הסוד בכלל טעון, ומה טביעת האצבע שלו.
+
+    ה-sha הוא של הסוד ולא הסוד — אפשר להשוות אותו מול whqueue:
+        sudo docker exec $CID sh -c \\
+          'cat /run/secrets/whqueue_app_secret | tr -d "\\n\\r " | sha256sum'
+    שונה = שני הרכיבים מחזיקים app secrets שונים, ואחד מהם ייכשל.
+    """
+    if not APP_SECRET:
+        return {"loaded": False, "hint": "WA_APP_SECRET לא מוגדר"}
+    return {
+        "loaded": True,
+        "len": len(APP_SECRET),
+        "looks_like_app_secret": len(APP_SECRET) == 32
+                                 and all(c in "0123456789abcdef" for c in APP_SECRET.lower()),
+        "sha256": hashlib.sha256(APP_SECRET.encode()).hexdigest(),
+    }
 
 
 # ══════════════════════════════════════════════ החלפה בין A ל-B
