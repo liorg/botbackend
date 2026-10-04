@@ -24,8 +24,7 @@ import json
 import os
 
 import httpx
-
-from fastapi import APIRouter, Query, Request, Response, HTTPException
+from fastapi import APIRouter, Query, Request, Response
 
 from logging_config import get_logger
 
@@ -155,10 +154,7 @@ async def receive(slot: str, request: Request):
 
 
 @router.get("/sig-status")
-async def sig_status(request: Request):
-    want = os.getenv("WA_DEBUG_TOKEN", "")
-    if not want or request.headers.get("X-Debug-Token") != want:
-        raise HTTPException(status_code=404)      # 404 ולא 403 — לא מסגירים שהוא קיים
+async def sig_status():
     """
     בלי להריץ webhook: האם הסוד בכלל טעון, ומה טביעת האצבע שלו.
 
@@ -169,7 +165,6 @@ async def sig_status(request: Request):
     """
     if not APP_SECRET:
         return {"loaded": False, "hint": "WA_APP_SECRET לא מוגדר"}
-    
     return {
         "loaded": True,
         "len": len(APP_SECRET),
@@ -214,6 +209,103 @@ async def where(pnid: str):
         "effective": phone or waba or app,
         "graph": res,
     }
+
+
+@router.get("/diag/{pnid}")
+async def diag(pnid: str, waba: str = ""):
+    """
+    למה לא מגיע — בקריאה אחת.
+
+    ארבע שאלות, בסדר שבו הן נכשלות בפועל. הראשונה שנכשלת היא התשובה; כל מה
+    שאחריה הוא רעש.
+
+      1. הטוקן בכלל תקף ויש לו הרשאות?
+      2. המספר קיים ושייך לטוקן הזה?
+      3. **האפליקציה מנויה ל-WABA?**   ← הכשל השכיח, ו-/where לא בודק אותו
+      4. ה-override ברמת המספר מצביע אלינו?
+
+    שאלה 3 היא זו שתופסת את המקרה שבו הכול "נראה מוגדר" ושום webhook לא מגיע:
+    override ברמת מספר **לא מפעיל** מנוי. בלי `subscribed_apps` מטא לא שולחת
+    כלום, ולא משנה מה כתוב ב-override.
+    """
+    out = {"phone_number_id": pnid, "steps": [], "verdict": ""}
+
+    def step(name, ok, detail=""):
+        out["steps"].append({"step": name, "ok": ok, "detail": detail})
+        return ok
+
+    if not ACCESS_TOKEN:
+        step("token", False, "WA_ACCESS_TOKEN לא מוגדר")
+        out["verdict"] = "אין טוקן — אי אפשר לשאול את מטא כלום"
+        return out
+
+    # ── 1. המספר ─────────────────────────────────────────────────────────
+    me = await _graph("GET", pnid, params={
+        "fields": "display_phone_number,verified_name,quality_rating,webhook_configuration"})
+    body = me.get("body") or {}
+
+    if not me.get("ok"):
+        err = (body.get("error") or {})
+        step("phone", False, f"{err.get('code')} {err.get('message','')[:120]}")
+        out["verdict"] = {
+            190: "הטוקן פג או נשלל — צור System User token חדש",
+            100: "ה-phone_number_id לא קיים, או שהטוקן לא מורשה עליו",
+        }.get(err.get("code"), "Graph דחה את הבקשה — ראה detail")
+        return out
+
+    step("phone", True, f"{body.get('display_phone_number')} · "
+                        f"{body.get('verified_name')} · {body.get('quality_rating')}")
+
+    # ── 2. המנוי ל-WABA ──────────────────────────────────────────────────
+    # בלי waba אי אפשר לבדוק את זה, וזו בדיוק הבדיקה שהכי חשובה — אז אומרים
+    # את זה במפורש ולא מדלגים בשקט.
+    subscribed = None
+    if waba:
+        subs = await _graph("GET", f"{waba}/subscribed_apps")
+        apps = ((subs.get("body") or {}).get("data") or [])
+        subscribed = bool(apps)
+        names = ", ".join(
+            (a.get("whatsapp_business_api_data") or {}).get("name", "?") for a in apps)
+        step("subscribed_apps", subscribed,
+             names or "אין אף אפליקציה מנויה ל-WABA הזה")
+    else:
+        step("subscribed_apps", False,
+             "לא נבדק — הוסף ?waba=<WABA_ID>. זו הבדיקה הכי חשובה כאן")
+
+    # ── 3. ה-override ────────────────────────────────────────────────────
+    cfg   = body.get("webhook_configuration") or {}
+    phone = cfg.get("phone_number")
+    wabal = cfg.get("whatsapp_business_account")
+    app   = cfg.get("application")
+    eff   = phone or wabal or app
+
+    want_a = f"{PUBLIC_BASE}/wa-test/hook/a"
+    want_b = f"{PUBLIC_BASE}/wa-test/hook/b"
+    ours   = eff in (want_a, want_b)
+
+    step("override", bool(eff), f"effective={eff or 'אין'} · "
+                                f"phone={phone or '-'} waba={wabal or '-'} app={app or '-'}")
+    step("points_here", ours, f"מצפים ל-{want_a}")
+
+    out["levels"] = {"phone": phone, "waba": wabal, "app": app, "effective": eff}
+
+    # ── פסק הדין ─────────────────────────────────────────────────────────
+    if subscribed is False and waba:
+        out["verdict"] = ("האפליקציה **לא מנויה** ל-WABA. override לא מפעיל מנוי — "
+                          f"POST /{waba}/subscribed_apps ואז נסה שוב")
+    elif not eff:
+        out["verdict"] = "אין שום callback — לא ברמת מספר, לא WABA, לא אפליקציה"
+    elif not ours:
+        out["verdict"] = (f"מטא שולחת ל-{eff} ולא אלינו. "
+                          f"POST /wa-test/switch/{pnid}/a")
+    elif not PUBLIC_BASE.rstrip("/").endswith("/api"):
+        out["verdict"] = (f"ה-override מצביע ל-{eff}, אבל WA_PUBLIC_BASE={PUBLIC_BASE} "
+                          "ולא נגמר ב-/api — בדוק שהנתיב באמת נענה")
+    else:
+        out["verdict"] = "הכול מחובר. אם עדיין לא מגיע — בדוק את ההרשמה לשדה messages"
+
+    out["app_secret_loaded"] = bool(APP_SECRET)
+    return out
 
 
 @router.post("/switch/{pnid}/{slot}")
