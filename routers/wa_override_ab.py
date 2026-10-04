@@ -15,7 +15,8 @@ ENV:
   WA_ACCESS_TOKEN   טוקן Meta
   WA_APP_SECRET     App → Settings → Basic → App Secret   ← החדש
   WA_VERIFY_TOKEN   ברירת מחדל test123
-  WA_PUBLIC_BASE    למשל https://backend.grossman.bot
+  WA_PUBLIC_BASE    למשל https://backend.grossman.bot/api   ← כולל הקידומת
+  WA_DEBUG_TOKEN    פותח את /sig-status · /diag · /where · /switch. בלעדיו 404
 """
 
 import hashlib
@@ -24,7 +25,7 @@ import json
 import os
 
 import httpx
-from fastapi import APIRouter, Query, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from logging_config import get_logger
 
@@ -41,6 +42,19 @@ APP_SECRET   = os.getenv("WA_APP_SECRET", "")
 # כמה POST-ים ראשונים מדפיסים את **כל** ההדרים. פעם אחת זה מלמד יותר מכל
 # תיעוד: רואים בדיוק מה מטא שולחת, ומה היא לא (אין verify token, אין טוקן).
 _dump_left = int(os.getenv("WA_DUMP_HEADERS", "3"))
+
+# ── השער על מה שאינו hook ────────────────────────────────────────────────
+# /switch משנה את הניתוב של מספר **חי** במטא, ו-/diag ו-/where חושפים את
+# ההגדרות. שלושתם היו פתוחים לכל האינטרנט. בלי WA_DEBUG_TOKEN הם מחזירים
+# 404 — כבויים כברירת מחדל, ולא מסגירים שהם קיימים.
+#
+# ה-hooks עצמם **לא** מאחורי השער: מטא חייבת להגיע אליהם.
+DEBUG_TOKEN = os.getenv("WA_DEBUG_TOKEN", "")
+
+
+def gate(request: Request) -> None:
+    if not DEBUG_TOKEN or request.headers.get("X-Debug-Token") != DEBUG_TOKEN:
+        raise HTTPException(status_code=404)
 
 
 # ══════════════════════════════════════════════ אימות החתימה
@@ -154,7 +168,7 @@ async def receive(slot: str, request: Request):
 
 
 @router.get("/sig-status")
-async def sig_status():
+async def sig_status(request: Request):
     """
     בלי להריץ webhook: האם הסוד בכלל טעון, ומה טביעת האצבע שלו.
 
@@ -163,6 +177,7 @@ async def sig_status():
           'cat /run/secrets/whqueue_app_secret | tr -d "\\n\\r " | sha256sum'
     שונה = שני הרכיבים מחזיקים app secrets שונים, ואחד מהם ייכשל.
     """
+    gate(request)
     if not APP_SECRET:
         return {"loaded": False, "hint": "WA_APP_SECRET לא מוגדר"}
     return {
@@ -194,8 +209,10 @@ async def _graph(method: str, pnid: str, **kw) -> dict:
 
 
 @router.get("/where/{pnid}")
-async def where(pnid: str):
+async def where(pnid: str, request: Request = None):
     """לאן המספר הזה שולח כרגע."""
+    if request is not None:
+        gate(request)
     res = await _graph("GET", pnid, params={"fields": "webhook_configuration"})
     cfg = (res.get("body") or {}).get("webhook_configuration", {}) or {}
     phone = cfg.get("phone_number")
@@ -212,7 +229,7 @@ async def where(pnid: str):
 
 
 @router.get("/diag/{pnid}")
-async def diag(pnid: str, waba: str = ""):
+async def diag(request: Request, pnid: str, waba: str = ""):
     """
     למה לא מגיע — בקריאה אחת.
 
@@ -228,6 +245,7 @@ async def diag(pnid: str, waba: str = ""):
     override ברמת מספר **לא מפעיל** מנוי. בלי `subscribed_apps` מטא לא שולחת
     כלום, ולא משנה מה כתוב ב-override.
     """
+    gate(request)
     out = {"phone_number_id": pnid, "steps": [], "verdict": ""}
 
     def step(name, ok, detail=""):
@@ -309,11 +327,12 @@ async def diag(pnid: str, waba: str = ""):
 
 
 @router.post("/switch/{pnid}/{slot}")
-async def switch(pnid: str, slot: str):
+async def switch(request: Request, pnid: str, slot: str):
     """
     slot = a | b | off
     off מחזיר את המספר ל-URL הקיים שלך (זה שברמת ה-app).
     """
+    gate(request)
     slot = slot.lower()
     if slot == "off":
         target = ""
