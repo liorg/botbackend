@@ -368,7 +368,7 @@ async def delete_contact(
 # PING Flow - Step 1: שלח PING
 # ══════════════════════════════════════════════════════════════════════
 
-@router.post("/contacts/create-from-ping", summary="Send PING (step 1)", description="Creates, reuses or overrides the contact for a number, then sends a PING message in the contact's language through the agent. Unlinked drafts with a real LID are linked to this contact.")
+@router.post("/contacts/create-from-ping", summary="Send PING (step 1)", description="Creates, reuses or overrides the contact for a number, then sends a PING message in the contact's language through the agent. Unlinked drafts with the same number are linked to this contact.")
 async def create_contact_from_ping(
     body: CreateContactFromPingRequest,
     user=Depends(get_current_user),
@@ -550,24 +550,21 @@ async def create_contact_from_ping(
             except Exception as e:
                 logger.warning(f"[PING] Failed to update contact_id: {e}")
 
+        # drafts פנויים של אותו מספר בלבד — ה-webhook שומר number מתוך send_to,
+        # כך ש-draft של אדם אחר לא מוצמד לאיש הקשר שקיבל PING
         try:
-            draft_res = (
+            linked = (
                 db.table("contacts")
-                .select("id, lid, number")
+                .update({"parent_contact_id": contact["id"]})
                 .eq("phone_id", body.phone_id)
                 .eq("tag", "draft")
+                .eq("number", clean_number)
                 .is_("parent_contact_id", "null")
                 .neq("id", contact["id"])
                 .execute()
             )
-            for draft in draft_res.data or []:
-                draft_lid    = draft.get("lid") or ""
-                draft_number = draft.get("number") or ""
-                if _is_valid_lid(draft_lid) and draft_lid != draft_number:
-                    db.table("contacts").update({
-                        "parent_contact_id": contact["id"]
-                    }).eq("id", draft["id"]).execute()
-                    logger.info(f"[PING] Linked draft {draft['id']} → parent {contact['id']}")
+            for d in linked.data or []:
+                logger.info(f"[PING] Linked draft {d['id']} → parent {contact['id']}")
         except Exception as e:
             logger.warning(f"[PING] Failed to link drafts: {e}")
 
@@ -746,7 +743,7 @@ async def get_outgoing_with_replies(
 # PING Flow - Step 3: בחירת תגובה וקישור LID
 # ══════════════════════════════════════════════════════════════════════
 
-@router.post("/contacts/select-response", summary="Select PING reply (step 3)", description="Takes the LID from the chosen message, sets it on the target contact and tags it 'active'. Clears the LID from the draft, links remaining drafts to the contact and completes the pending PING.")
+@router.post("/contacts/select-response", summary="Select PING reply (step 3)", description="Takes the LID from the chosen message, sets it on the target contact and tags it 'active'. Clears the LID from the draft, links unlinked drafts with the same LID or number to the contact and completes the pending PING.")
 async def select_response(
     body: SelectResponseRequest,
     user=Depends(get_current_user),
@@ -833,15 +830,23 @@ async def select_response(
             except Exception as e:
                 logger.warning(f"[PONG] Failed to set parent_contact_id on draft: {e}")
 
-        # ── עדכן כל שאר ה-drafts שקשורים לפי LID ──────────────────
+        # ── drafts פנויים של אותו אדם בלבד — אותו LID או אותו מספר ──
         try:
-            db.table("contacts").update({
-                "parent_contact_id": target_contact_id
-            }).eq("phone_id", result.data[0].get("phone_id", "")) \
-              .eq("tag", "draft") \
-              .is_("parent_contact_id", "null") \
-              .execute()
-            logger.info(f"[PONG] Linked all remaining drafts → parent {target_contact_id}")
+            target_number = "".join(ch for ch in (result.data[0].get("number") or "") if ch.isdigit())
+            same_person = [f"lid.eq.{selected_lid}"]
+            if 7 <= len(target_number) <= 15:
+                same_person.append(f"number.eq.{target_number}")
+            linked = (
+                db.table("contacts")
+                .update({"parent_contact_id": target_contact_id})
+                .eq("phone_id", result.data[0].get("phone_id", ""))
+                .eq("tag", "draft")
+                .is_("parent_contact_id", "null")
+                .neq("id", target_contact_id)
+                .or_(",".join(same_person))
+                .execute()
+            )
+            logger.info(f"[PONG] Linked {len(linked.data or [])} drafts → parent {target_contact_id}")
         except Exception as e:
             logger.warning(f"[PONG] Failed to link remaining drafts: {e}")
 
