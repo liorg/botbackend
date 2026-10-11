@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from supabase import Client, create_client
 
 from routers import (
-    auth,  phones,  contacts,  scenarios,   schedules,   calls,messages,  proxy_media,  phones_contacts,  webhook_registrations, notifications, active_chats,contact_calls, wa_override_ab,phone_admin
+    auth,  phones,  contacts,  scenarios,   schedules,   calls,messages,  proxy_media,  phones_contacts,  webhook_registrations, notifications, active_chats,contact_calls, wa_override_ab,phone_admin,contact_connect
 )
 from config import APP_MODE
 from routers.template_manager import router as templates_router
@@ -157,6 +157,7 @@ elif APP_MODE == "client":
     app.include_router(schedules.router, prefix="/api")
     app.include_router(phones_contacts.router, prefix="/api")
     app.include_router(templates_router, prefix="/api")
+    app.include_router(contact_connect.router, prefix="/api")  # same prefix as contacts
 
 # ── Startup / Shutdown ────────────────────────────────────────
 @app.on_event("startup")
