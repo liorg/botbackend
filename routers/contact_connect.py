@@ -1,15 +1,21 @@
 # routers/contact_connect.py
-# Connect / ignore for contacts with tag=new from the calls screen.
+# Connect / ignore for contacts with tag=new from the calls screen + contact conversation.
 #
 #   connect:
 #     no other contact on the phone with that number → updated in place: active + is_connect
 #     a contact with that number exists              → it becomes active (target),
 #                                                    the source becomes a draft with parent_contact_id = target
 #   ignore: tag = ignore
+#
+#   conversation:
+#     root     = the contact; a connected draft (is_connect + parent_contact_id) resolves to its parent
+#     family   = root + drafts with parent_contact_id = root AND is_connect = true
+#     messages = contact_id ∈ family
+import json
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from supabase import Client
 
@@ -22,6 +28,11 @@ logger = get_logger("contact_connect")
 router = APIRouter(tags=["contacts"])
 
 CONNECTABLE_TAGS = {"new", "draft"}
+
+MSG_COLS = (
+    "id,sender,content,status,sent_at,direction,whatsapp_message_id,"
+    "contact_id,phone_id,media_url,send_to,tool_tip,call_id"
+)
 
 
 class ConnectContactRequest(BaseModel):
@@ -61,6 +72,184 @@ def _load(db: Client, contact_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Contact not found")
     return res.data[0]
 
+
+# ── conversation helpers ─────────────────────────────────────────────
+
+def _resolve_root(db: Client, c: dict) -> dict:
+    pid = c.get("parent_contact_id")
+    if pid:
+        res = db.table("contacts").select("*").eq("id", pid).limit(1).execute()
+        if res.data:
+            return res.data[0]
+    return c
+
+
+def _family(db: Client, root: dict) -> tuple[list[str], list[str]]:
+    ors = [f"parent_contact_id.eq.{root['id']}"]
+    for ident in {_digits(root.get("number")), _digits(root.get("lid"))}:
+        if len(ident) >= 7:
+            ors += [f"number.eq.{ident}", f"lid.eq.{ident}"]
+
+    res = (
+        db.table("contacts").select("id,number,lid")
+        .eq("phone_id", root["phone_id"])
+        .or_(",".join(ors))
+        .execute()
+    )
+    rows = {root["id"]: root}
+    for r in res.data or []:
+        rows[r["id"]] = r
+
+    idents: set[str] = set()
+    for r in rows.values():
+        for v in (_digits(r.get("number")), _digits(r.get("lid"))):
+            if len(v) >= 7:
+                idents.add(v)
+
+    ids = [root["id"]] + [i for i in rows if i != root["id"]]
+    return ids, sorted(idents)
+
+
+def _msg_filter(ids: list[str], idents: list[str]) -> str:
+    parts = [f"contact_id.in.({','.join(ids)})"]
+    if idents:
+        jids = ",".join(f'"{i}@s.whatsapp.net","{i}@lid"' for i in idents)
+        senders = ",".join(f'"{i}"' for i in idents)
+        parts.append(f"send_to.in.({jids})")
+        parts.append(f"sender.in.({senders})")
+    return ",".join(parts)
+
+
+def _parse_content(raw) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, dict) else {"text": str(v), "type": "text"}
+    except Exception:
+        return {"text": str(raw), "type": "text"}
+
+
+def _shape(m: dict, ids: set[str], idents: set[str]) -> dict:
+    content = _parse_content(m.get("content"))
+    sender = _digits(m.get("sender"))
+    return {
+        **m,
+        "content":   content,
+        "type":      content.get("type") or "text",
+        "text":      content.get("text") or content.get("caption"),
+        "media_url": m.get("media_url") or content.get("mediaUrl"),
+        "incoming":  sender in idents if sender else bool(m.get("direction")),
+        "orphan":    m.get("contact_id") not in ids,
+    }
+
+
+def _conversation_ctx(db: Client, contact_id: str):
+    root = _resolve_root(db, _load(db, contact_id))
+    ids, idents = _family(db, root)
+    return root, ids, idents
+
+
+# ── conversation ─────────────────────────────────────────────────────
+
+@router.get(
+    "/contacts/{contact_id}/conversation",
+    summary="Contact conversation",
+    description=(
+        "Returns the contact's messages, oldest → newest. A draft resolves to its parent.\n\n"
+        "Matches by `contact_id` of the whole family, and also by `send_to`/`sender` = the contact's number or LID — "
+        "so messages saved on a different contact_id appear too (`orphan=true`).\n\n"
+        "Paging: `before` = `sent_at` of the oldest message already loaded."
+    ),
+    responses={404: {"description": "Contact not found"}},
+)
+async def get_conversation(
+    contact_id: str,
+    limit: int = Query(50, ge=1, le=200),
+    before: Optional[str] = Query(None, description="sent_at — return messages older than this"),
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    try:
+        root, ids, idents = _conversation_ctx(db, contact_id)
+
+        q = (
+            db.table("messages").select(MSG_COLS)
+            .eq("phone_id", root["phone_id"])
+            .or_(_msg_filter(ids, idents))
+        )
+        if before:
+            q = q.lt("sent_at", before)
+        rows = q.order("sent_at", desc=True).limit(limit).execute().data or []
+        rows.reverse()
+
+        id_set, ident_set = set(ids), set(idents)
+        msgs = [_shape(m, id_set, ident_set) for m in rows]
+
+        return {
+            "contact":     root,
+            "contact_ids": ids,
+            "identities":  idents,
+            "messages":    msgs,
+            "has_more":    len(rows) == limit,
+            "orphans":     sum(1 for m in msgs if m["orphan"]),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[conversation] error contact={contact_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/contacts/{contact_id}/conversation/relink",
+    summary="Relink conversation messages to the contact",
+    description="Moves every message of the conversation (drafts + orphans) to `contact_id` of the root contact. Idempotent.",
+    responses={404: {"description": "Contact not found"}},
+)
+async def relink_conversation(
+    contact_id: str,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    try:
+        root, ids, idents = _conversation_ctx(db, contact_id)
+        flt = _msg_filter(ids, idents)
+
+        to_move: list[str] = []
+        start = 0
+        while True:
+            chunk = (
+                db.table("messages").select("id,contact_id")
+                .eq("phone_id", root["phone_id"])
+                .or_(flt)
+                .order("id")
+                .range(start, start + RELINK_PAGE - 1)
+                .execute().data or []
+            )
+            to_move += [m["id"] for m in chunk if m.get("contact_id") != root["id"]]
+            if len(chunk) < RELINK_PAGE:
+                break
+            start += RELINK_PAGE
+
+        moved = 0
+        for i in range(0, len(to_move), 200):
+            res = db.table("messages").update({"contact_id": root["id"]}) \
+                    .in_("id", to_move[i:i + 200]).execute()
+            moved += len(res.data or [])
+
+        logger.info(f"[conversation] relink root={root['id']} moved={moved}")
+        return {"success": True, "contact_id": root["id"], "moved_messages": moved}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[conversation] relink error contact={contact_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── connect ──────────────────────────────────────────────────────────
 
 @router.post(
     "/contacts/{contact_id}/connect",
