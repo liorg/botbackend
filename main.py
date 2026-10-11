@@ -146,6 +146,7 @@ if APP_MODE == "internal":
     app.include_router(contact_calls.router, prefix="/api")  
     app.include_router(templates_router, prefix="/api")
     app.include_router(wa_override_ab.router, prefix="/api")   
+    app.include_router(contact_connect.router, prefix="/api") 
     
 elif APP_MODE == "client":
     # בהתחלה רק endpoints שאתה באמת רוצה לחשוף
@@ -157,7 +158,7 @@ elif APP_MODE == "client":
     app.include_router(schedules.router, prefix="/api")
     app.include_router(phones_contacts.router, prefix="/api")
     app.include_router(templates_router, prefix="/api")
-    app.include_router(contact_connect.router, prefix="/api")  # same prefix as contacts
+    app.include_router(contact_connect.router, prefix="/api") 
 
 # ── Startup / Shutdown ────────────────────────────────────────
 @app.on_event("startup")
