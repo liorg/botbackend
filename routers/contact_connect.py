@@ -10,10 +10,7 @@
 #   conversation:
 #     root     = the contact; a connected draft (is_connect + parent_contact_id) resolves to its parent
 #     family   = root + drafts with parent_contact_id = root AND is_connect = true
-#     by number: messages with send_to = {root.number}@s.whatsapp.net → their contact_id is taken
-#                if it is not connected (is_connect=false, no parent) — same person, not yet linked.
-#                A contact connected to a different parent is excluded.
-#     messages = contact_id ∈ family ∪ unconnected-by-number
+#     messages = contact_id ∈ family
 import json
 from datetime import datetime, timezone
 from typing import Optional
@@ -36,7 +33,6 @@ MSG_COLS = (
     "id,sender,content,status,sent_at,direction,whatsapp_message_id,"
     "contact_id,phone_id,media_url,send_to,tool_tip,call_id"
 )
-SCAN_PAGE = 1000
 
 
 class ConnectContactRequest(BaseModel):
@@ -90,48 +86,12 @@ def _resolve_root(db: Client, c: dict) -> dict:
 
 def _family(db: Client, root: dict) -> list[dict]:
     res = (
-        db.table("contacts").select("id,number,lid,is_connect,parent_contact_id")
+        db.table("contacts").select("id")
         .eq("parent_contact_id", root["id"])
         .eq("is_connect", True)
         .execute()
     )
     return [root] + (res.data or [])
-
-
-def _unconnected_by_number(db: Client, root: dict, known: set[str]) -> list[dict]:
-    """Contacts whose messages were sent to root's number but are not linked to anyone yet."""
-    number = _digits(root.get("number"))
-    if not (7 <= len(number) <= 15):
-        return []
-
-    cids: set[str] = set()
-    start = 0
-    while True:
-        chunk = (
-            db.table("messages").select("contact_id")
-            .eq("phone_id", root["phone_id"])
-            .eq("send_to", f"{number}@s.whatsapp.net")
-            .range(start, start + SCAN_PAGE - 1)
-            .execute().data or []
-        )
-        cids.update(m["contact_id"] for m in chunk if m.get("contact_id"))
-        if len(chunk) < SCAN_PAGE:
-            break
-        start += SCAN_PAGE
-
-    cids -= known
-    if not cids:
-        return []
-
-    res = (
-        db.table("contacts").select("id,number,lid,is_connect,parent_contact_id")
-        .in_("id", list(cids))
-        .execute()
-    )
-    return [
-        c for c in res.data or []
-        if not c.get("is_connect") and not c.get("parent_contact_id")
-    ]
 
 
 def _parse_content(raw) -> dict:
@@ -146,16 +106,15 @@ def _parse_content(raw) -> dict:
         return {"text": str(raw), "type": "text"}
 
 
-def _shape(m: dict, idents: set[str]) -> dict:
+def _shape(m: dict) -> dict:
     content = _parse_content(m.get("content"))
-    sender = _digits(m.get("sender"))
     return {
         **m,
         "content":   content,
         "type":      content.get("type") or "text",
         "text":      content.get("text") or content.get("caption"),
         "media_url": m.get("media_url") or content.get("mediaUrl"),
-        "incoming":  sender in idents if sender else bool(m.get("direction")),
+        "incoming":  bool(m.get("direction")),   # WebhookController: direction = isIncoming
     }
 
 
@@ -167,9 +126,7 @@ def _shape(m: dict, idents: set[str]) -> dict:
     description=(
         "Returns the contact's messages, oldest → newest.\n\n"
         "A connected draft (`is_connect=true` + `parent_contact_id`) resolves to its parent. "
-        "The conversation = messages of the root + of every draft with `parent_contact_id = root` and `is_connect = true` "
-        "+ messages with `send_to = {root.number}@s.whatsapp.net` whose contact is not connected yet "
-        "(`is_connect=false`, no parent) — returned in `unlinked_ids`.\n\n"
+        "The conversation = messages of the root + of every draft with `parent_contact_id = root` and `is_connect = true`.\n\n"
         "Paging: `before` = `sent_at` of the oldest message already loaded."
     ),
     responses={404: {"description": "Contact not found"}},
@@ -184,15 +141,7 @@ async def get_conversation(
     try:
         root = _resolve_root(db, _load(db, contact_id))
         family = _family(db, root)
-        unlinked = _unconnected_by_number(db, root, {c["id"] for c in family})
-        family += unlinked
         ids = [c["id"] for c in family]
-
-        idents: set[str] = set()
-        for c in family:
-            for v in (_digits(c.get("number")), _digits(c.get("lid"))):
-                if len(v) >= 7:
-                    idents.add(v)
 
         q = db.table("messages").select(MSG_COLS).in_("contact_id", ids)
         if before:
@@ -203,8 +152,7 @@ async def get_conversation(
         return {
             "contact":     root,
             "contact_ids": ids,
-            "unlinked_ids": [c["id"] for c in unlinked],
-            "messages":    [_shape(m, idents) for m in rows],
+            "messages":    [_shape(m) for m in rows],
             "has_more":    len(rows) == limit,
         }
     except HTTPException:
