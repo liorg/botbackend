@@ -25,12 +25,12 @@ CONNECTABLE_TAGS = {"new", "draft"}
 
 
 class ConnectContactRequest(BaseModel):
-    name: str = Field(..., description="Contact name. Required.")
-    number: Optional[str] = Field(None, description="Phone number. Required when the contact has no valid number (7-15 digits).")
-    lang: Optional[str] = Field(None, description="Contact language. If omitted: the contact's language, then the phone owner's.")
+    name: str = Field(..., description="Contact name. Required. A leading ~ is stripped.")
+    number: Optional[str] = Field(None, description="Phone number (7-15 digits). Required when the contact has no valid number.")
+    lang: Optional[str] = Field(None, description="Messaging language (he/en/ru/ar). If omitted: the contact's language, then the phone owner's.")
     email: Optional[str] = Field(None, description="Email. An empty string clears it.")
     move_messages: bool = Field(True, description="On merge: move the source contact's messages to the target contact.")
-    force: bool = Field(False, description="Merge even when the target already has a different LID.")
+    force: bool = Field(False, description="Merge even when the target already has a different LID (bypasses lid_conflict).")
 
 
 def _digits(v: Optional[str]) -> str:
@@ -65,9 +65,22 @@ def _load(db: Client, contact_id: str) -> dict:
 @router.post(
     "/contacts/{contact_id}/connect",
     summary="Connect unidentified contact",
-    description="Sets name, number, language and email on a 'new' contact and makes it active. "
-                "If another contact on the phone already has that number, that contact becomes active "
-                "and this one becomes its draft (parent_contact_id).",
+    description=(
+        "Completes the details (name, number, language, email) of a `new`/`draft` contact and makes it active.\n\n"
+        "**`in_place` mode** - no other contact on the phone has that number: the contact is updated in place, "
+        "`tag=active`, `is_connect=true`. If it has no real LID, the LID is set to the number.\n\n"
+        "**`merged` mode** - a contact with that number already exists: the existing one (target) becomes `active` "
+        "and receives the name/language/email and the source's LID. The source becomes a `draft` with "
+        "`parent_contact_id` pointing at the target. If `move_messages=true`, messages are moved to the target. "
+        "Drafts that pointed at the source are relinked to the target.\n\n"
+        "**`lid_conflict` (409)** - source and target have different LIDs. Resend with `force=true` to merge anyway.\n\n"
+        "In all cases, open `ping_sender` rows of the contacts involved are marked `completed`."
+    ),
+    responses={
+        400: {"description": "`name_required` - name missing, or `number_required` - invalid number (7-15 digits)"},
+        404: {"description": "Contact not found"},
+        409: {"description": "Tag cannot be connected, or `lid_conflict` - target is linked to a different LID"},
+    },
 )
 async def connect_contact(
     contact_id: str,
@@ -213,7 +226,15 @@ async def connect_contact(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/contacts/{contact_id}/ignore", summary="Ignore contact", description="Sets tag='ignore'. The contact is hidden from the calls screen.")
+@router.post(
+    "/contacts/{contact_id}/ignore",
+    summary="Ignore contact",
+    description=(
+        "Sets `tag=ignore`. The contact is hidden from the calls screen and the contacts list "
+        "(which shows only `new`/`active`). Reversible via `/unignore`."
+    ),
+    responses={404: {"description": "Contact not found"}},
+)
 async def ignore_contact(
     contact_id: str,
     user=Depends(get_current_user),
@@ -232,7 +253,12 @@ async def ignore_contact(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/contacts/{contact_id}/unignore", summary="Restore ignored contact", description="Returns an ignored contact to tag='new'.")
+@router.post(
+    "/contacts/{contact_id}/unignore",
+    summary="Restore ignored contact",
+    description="Returns a contact with `tag=ignore` to `tag=new`, so it appears again in the unidentified list on the calls screen.",
+    responses={404: {"description": "No ignored contact found with this ID"}},
+)
 async def unignore_contact(
     contact_id: str,
     user=Depends(get_current_user),
