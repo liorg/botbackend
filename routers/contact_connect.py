@@ -10,7 +10,10 @@
 #   conversation:
 #     root     = the contact; a connected draft (is_connect + parent_contact_id) resolves to its parent
 #     family   = root + drafts with parent_contact_id = root AND is_connect = true
-#     messages = contact_id ∈ family
+#     by number: messages with send_to = {root.number}@s.whatsapp.net → their contact_id is taken
+#                if it is not connected (is_connect=false, no parent) — same person, not yet linked.
+#                A contact connected to a different parent is excluded.
+#     messages = contact_id ∈ family ∪ unconnected-by-number
 import json
 from datetime import datetime, timezone
 from typing import Optional
@@ -33,6 +36,7 @@ MSG_COLS = (
     "id,sender,content,status,sent_at,direction,whatsapp_message_id,"
     "contact_id,phone_id,media_url,send_to,tool_tip,call_id"
 )
+SCAN_PAGE = 1000
 
 
 class ConnectContactRequest(BaseModel):
@@ -77,47 +81,57 @@ def _load(db: Client, contact_id: str) -> dict:
 
 def _resolve_root(db: Client, c: dict) -> dict:
     pid = c.get("parent_contact_id")
-    if pid:
+    if pid and c.get("is_connect"):
         res = db.table("contacts").select("*").eq("id", pid).limit(1).execute()
         if res.data:
             return res.data[0]
     return c
 
 
-def _family(db: Client, root: dict) -> tuple[list[str], list[str]]:
-    ors = [f"parent_contact_id.eq.{root['id']}"]
-    for ident in {_digits(root.get("number")), _digits(root.get("lid"))}:
-        if len(ident) >= 7:
-            ors += [f"number.eq.{ident}", f"lid.eq.{ident}"]
-
+def _family(db: Client, root: dict) -> list[dict]:
     res = (
-        db.table("contacts").select("id,number,lid")
-        .eq("phone_id", root["phone_id"])
-        .or_(",".join(ors))
+        db.table("contacts").select("id,number,lid,is_connect,parent_contact_id")
+        .eq("parent_contact_id", root["id"])
+        .eq("is_connect", True)
         .execute()
     )
-    rows = {root["id"]: root}
-    for r in res.data or []:
-        rows[r["id"]] = r
-
-    idents: set[str] = set()
-    for r in rows.values():
-        for v in (_digits(r.get("number")), _digits(r.get("lid"))):
-            if len(v) >= 7:
-                idents.add(v)
-
-    ids = [root["id"]] + [i for i in rows if i != root["id"]]
-    return ids, sorted(idents)
+    return [root] + (res.data or [])
 
 
-def _msg_filter(ids: list[str], idents: list[str]) -> str:
-    parts = [f"contact_id.in.({','.join(ids)})"]
-    if idents:
-        jids = ",".join(f'"{i}@s.whatsapp.net","{i}@lid"' for i in idents)
-        senders = ",".join(f'"{i}"' for i in idents)
-        parts.append(f"send_to.in.({jids})")
-        parts.append(f"sender.in.({senders})")
-    return ",".join(parts)
+def _unconnected_by_number(db: Client, root: dict, known: set[str]) -> list[dict]:
+    """Contacts whose messages were sent to root's number but are not linked to anyone yet."""
+    number = _digits(root.get("number"))
+    if not (7 <= len(number) <= 15):
+        return []
+
+    cids: set[str] = set()
+    start = 0
+    while True:
+        chunk = (
+            db.table("messages").select("contact_id")
+            .eq("phone_id", root["phone_id"])
+            .eq("send_to", f"{number}@s.whatsapp.net")
+            .range(start, start + SCAN_PAGE - 1)
+            .execute().data or []
+        )
+        cids.update(m["contact_id"] for m in chunk if m.get("contact_id"))
+        if len(chunk) < SCAN_PAGE:
+            break
+        start += SCAN_PAGE
+
+    cids -= known
+    if not cids:
+        return []
+
+    res = (
+        db.table("contacts").select("id,number,lid,is_connect,parent_contact_id")
+        .in_("id", list(cids))
+        .execute()
+    )
+    return [
+        c for c in res.data or []
+        if not c.get("is_connect") and not c.get("parent_contact_id")
+    ]
 
 
 def _parse_content(raw) -> dict:
@@ -132,7 +146,7 @@ def _parse_content(raw) -> dict:
         return {"text": str(raw), "type": "text"}
 
 
-def _shape(m: dict, ids: set[str], idents: set[str]) -> dict:
+def _shape(m: dict, idents: set[str]) -> dict:
     content = _parse_content(m.get("content"))
     sender = _digits(m.get("sender"))
     return {
@@ -142,14 +156,7 @@ def _shape(m: dict, ids: set[str], idents: set[str]) -> dict:
         "text":      content.get("text") or content.get("caption"),
         "media_url": m.get("media_url") or content.get("mediaUrl"),
         "incoming":  sender in idents if sender else bool(m.get("direction")),
-        "orphan":    m.get("contact_id") not in ids,
     }
-
-
-def _conversation_ctx(db: Client, contact_id: str):
-    root = _resolve_root(db, _load(db, contact_id))
-    ids, idents = _family(db, root)
-    return root, ids, idents
 
 
 # ── conversation ─────────────────────────────────────────────────────
@@ -158,9 +165,11 @@ def _conversation_ctx(db: Client, contact_id: str):
     "/contacts/{contact_id}/conversation",
     summary="Contact conversation",
     description=(
-        "Returns the contact's messages, oldest → newest. A draft resolves to its parent.\n\n"
-        "Matches by `contact_id` of the whole family, and also by `send_to`/`sender` = the contact's number or LID — "
-        "so messages saved on a different contact_id appear too (`orphan=true`).\n\n"
+        "Returns the contact's messages, oldest → newest.\n\n"
+        "A connected draft (`is_connect=true` + `parent_contact_id`) resolves to its parent. "
+        "The conversation = messages of the root + of every draft with `parent_contact_id = root` and `is_connect = true` "
+        "+ messages with `send_to = {root.number}@s.whatsapp.net` whose contact is not connected yet "
+        "(`is_connect=false`, no parent) — returned in `unlinked_ids`.\n\n"
         "Paging: `before` = `sent_at` of the oldest message already loaded."
     ),
     responses={404: {"description": "Contact not found"}},
@@ -173,79 +182,35 @@ async def get_conversation(
     db: Client = Depends(get_supabase),
 ):
     try:
-        root, ids, idents = _conversation_ctx(db, contact_id)
+        root = _resolve_root(db, _load(db, contact_id))
+        family = _family(db, root)
+        unlinked = _unconnected_by_number(db, root, {c["id"] for c in family})
+        family += unlinked
+        ids = [c["id"] for c in family]
 
-        q = (
-            db.table("messages").select(MSG_COLS)
-            .eq("phone_id", root["phone_id"])
-            .or_(_msg_filter(ids, idents))
-        )
+        idents: set[str] = set()
+        for c in family:
+            for v in (_digits(c.get("number")), _digits(c.get("lid"))):
+                if len(v) >= 7:
+                    idents.add(v)
+
+        q = db.table("messages").select(MSG_COLS).in_("contact_id", ids)
         if before:
             q = q.lt("sent_at", before)
         rows = q.order("sent_at", desc=True).limit(limit).execute().data or []
         rows.reverse()
 
-        id_set, ident_set = set(ids), set(idents)
-        msgs = [_shape(m, id_set, ident_set) for m in rows]
-
         return {
             "contact":     root,
             "contact_ids": ids,
-            "identities":  idents,
-            "messages":    msgs,
+            "unlinked_ids": [c["id"] for c in unlinked],
+            "messages":    [_shape(m, idents) for m in rows],
             "has_more":    len(rows) == limit,
-            "orphans":     sum(1 for m in msgs if m["orphan"]),
         }
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[conversation] error contact={contact_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post(
-    "/contacts/{contact_id}/conversation/relink",
-    summary="Relink conversation messages to the contact",
-    description="Moves every message of the conversation (drafts + orphans) to `contact_id` of the root contact. Idempotent.",
-    responses={404: {"description": "Contact not found"}},
-)
-async def relink_conversation(
-    contact_id: str,
-    user=Depends(get_current_user),
-    db: Client = Depends(get_supabase),
-):
-    try:
-        root, ids, idents = _conversation_ctx(db, contact_id)
-        flt = _msg_filter(ids, idents)
-
-        to_move: list[str] = []
-        start = 0
-        while True:
-            chunk = (
-                db.table("messages").select("id,contact_id")
-                .eq("phone_id", root["phone_id"])
-                .or_(flt)
-                .order("id")
-                .range(start, start + RELINK_PAGE - 1)
-                .execute().data or []
-            )
-            to_move += [m["id"] for m in chunk if m.get("contact_id") != root["id"]]
-            if len(chunk) < RELINK_PAGE:
-                break
-            start += RELINK_PAGE
-
-        moved = 0
-        for i in range(0, len(to_move), 200):
-            res = db.table("messages").update({"contact_id": root["id"]}) \
-                    .in_("id", to_move[i:i + 200]).execute()
-            moved += len(res.data or [])
-
-        logger.info(f"[conversation] relink root={root['id']} moved={moved}")
-        return {"success": True, "contact_id": root["id"], "moved_messages": moved}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[conversation] relink error contact={contact_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
