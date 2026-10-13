@@ -555,27 +555,35 @@ async def approve_and_publish(
     logger.info(f"[TPL] approve+publish {row['name']}/{row['lang']} phone={phone_id}")
     return _expand(result.data[0])
 
-@router.get("/", summary="List templates", description="Returns the phone's templates, newest first. status: all (default) or one status. Optional lang and name filters. Page size comes from bot_config 'templates.paging'. Returns counts per status for the same lang/q filters.")
+@router.get("/", summary="List templates", description="Returns templates newest first. phone_id='all' with phone_ids=a,b,c lists across phones. Optional status, lang and name filters. Page size comes from bot_config 'templates.paging'. Returns counts per status.")
 async def list_templates(
     phone_id: str,
     page: int = Query(1, description="Page number, starting at 1."),
-    status: Optional[str] = Query(None, description="all (default) or pending, approved, rejected, pause."),
+    status: Optional[str] = Query(None, description="Filter by status. Empty or 'all' = all."),
     lang: Optional[str] = Query(None, description="Filter by language code."),
     q: Optional[str] = Query(None, description="Search in the template name."),
+    phone_ids: Optional[str] = Query(None, description="Comma-separated phone ids, used when phone_id is 'all'."),
     db: Client = Depends(get_supabase),
 ):
     flt = status if status in STATUSES else "all"
     q = (q or "").strip() or None
 
+    if phone_id == "all":
+        ids = [x.strip() for x in (phone_ids or "").split(",") if x.strip()]
+        if not ids:
+            return {"items": [], "total": 0, "page": 1, "page_size": _get_page_size(db),
+                    "total_pages": 1, "status": flt, "counts": {"all": 0, **{s: 0 for s in STATUSES}}}
+    else:
+        ids = None
+
     def scoped(query):
-        query = query.eq("phone_id", phone_id)
+        query = query.in_("phone_id", ids) if ids else query.eq("phone_id", phone_id)
         if lang:
             query = query.eq("lang", lang)
         if q:
             query = query.ilike("name", f"%{q}%")
         return query
 
-    # counts לכל status — באותם lang/q, בלי ה-status עצמו
     rows = scoped(db.table("phone_templates").select("status")).execute().data or []
     counts = {s: 0 for s in STATUSES}
     for r in rows:
@@ -586,7 +594,7 @@ async def list_templates(
     page_size   = _get_page_size(db)
     total       = counts[flt]
     total_pages = max(1, (total + page_size - 1) // page_size)
-    page        = min(max(1, page), total_pages)   # עמוד שהתרוקן → האחרון שקיים
+    page        = min(max(1, page), total_pages)
     start       = (page - 1) * page_size
 
     query = scoped(db.table("phone_templates").select(_SELECT))
@@ -609,8 +617,6 @@ async def list_templates(
         "status":      flt,
         "counts":      counts,
     }
-    
-
 @router.get("/published", summary="List published templates", description="Returns approved and published templates ordered by name, for the scenario InputEditor.")
 async def list_published(phone_id: str, db: Client = Depends(get_supabase)):
     """לשימוש ה-InputEditor — רק תבניות מאושרות ומפורסמות."""
