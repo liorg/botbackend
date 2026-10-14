@@ -14,7 +14,7 @@ router = APIRouter(prefix="/phones/{phone_id}/scenarios", tags=["scenarios"])
 
 BOT_CONFIG_PAGE_KEY = "scenarios.paging"
 DEFAULT_PAGE_SIZE = 10
-
+DEFAULT_INTERVAL = {"mins": 3, "secs": 0}   # תואם ל-DEFAULT_INTERVAL ב-componentTypes.js
 
 def _get_page_size(db: Client) -> int:
     try:
@@ -88,7 +88,7 @@ def _expand_config(row: dict) -> dict:
     cfg = row.get("config") or {}
     row["canvas"]         = cfg.get("canvas", [])
     row["arrow_data"]     = cfg.get("arrow_data", {})
-    row["interval"]       = cfg.get("interval", {"mins": 0, "secs": 1})
+    row["interval"]       = cfg.get("interval", DEFAULT_INTERVAL)
     row["estimated_time"] = cfg.get("estimated_time")
     row["use_auto_calc"]  = cfg.get("use_auto_calc", True)
     row["description"]    = cfg.get("description", "")
@@ -186,7 +186,7 @@ async def _run_publish_checks(row: dict, db: Client, phone_id: str) -> list[dict
             "description":   cfg.get("description", ""),
             "botContact":    cfg.get("bot_contact"),
             "phone":         (cfg.get("bot_contact") or {}).get("phone", "") if cfg.get("bot_contact") else "",
-            "interval":      cfg.get("interval", {"mins": 0, "secs": 1}),
+            "interval":      cfg.get("interval", DEFAULT_INTERVAL),
             "estimatedTime": cfg.get("estimated_time"),
             "arrowData":     cfg.get("arrow_data", {}),
             "canvas":        canvas,
