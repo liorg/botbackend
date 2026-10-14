@@ -7,3 +7,4 @@ python-dotenv==1.0.1
 google-cloud-storage
 asyncpg
 apscheduler
+jsonschema==4.23.0
