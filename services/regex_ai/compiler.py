@@ -7,10 +7,11 @@ import unicodedata
 ANY = r"[\s\S]*"        # '.' לא חוצה שורות — הודעות WhatsApp יכולות להיות רב-שורתיות
 DIGIT = "[0-9]"         # \d תופס גם ספרות ערביות-הודיות
 LETTER = "[A-Za-zא-תء-يА-яЁё]"
+WORD = r"\S+"           # מילה = רצף בלי רווחים
 
 TYPES = ["starts_with", "ends_with", "contains", "contains_after",
          "exact", "digits", "letters", "one_of", "not_contains",
-         "space", "literal"]
+         "space", "literal", "words"]
 
 SCHEMA = {
     "type": "object",
@@ -66,6 +67,12 @@ def _component(c):
         return DIGIT + _quant(count, "digits")
     if t == "letters":
         return LETTER + _quant(count, "letters")
+    if t == "words":
+        if count is None:
+            return WORD + r"(?:\s+" + WORD + ")*"
+        if not isinstance(count, int) or count < 1:
+            raise ValueError(f"Invalid words count: {count}")
+        return WORD + (r"(?:\s+" + WORD + f"){{{count - 1}}}" if count > 1 else "")
     if t == "one_of":
         if not isinstance(value, list) or not value:
             raise ValueError("one_of requires values")
@@ -110,7 +117,7 @@ def compile_condition(data: dict) -> str:
         elif t == "starts_with" and i == 0:
             chain, anchored = escape_regex(c.get("value")), True
         elif t == "contains":
-            if nxt == "contains_after":
+            if nxt in ("contains_after", "space", "words", "literal", "digits", "letters", "one_of"):
                 chain += (ANY if chain else "") + escape_regex(c.get("value"))
             else:
                 looks.append("(?=" + ANY + escape_regex(c.get("value")) + ")")
@@ -202,6 +209,25 @@ CLOSING_WORDS = [
 ]
 
 
+START_WORDS = [
+    "מתחיל", "מתחילה", "להתחיל", "תחילת",
+    "start", "begin",
+    "начина",
+    "يبدأ", "تبدأ", "بداية",
+]
+
+
+def _fix_start(data, request):
+    """starts_with בלי שהבקשה אמרה 'מתחיל' — המודל ניחש. הערך יכול להופיע בכל מקום: starts_with → contains."""
+    conds = data.get("conditions") or []
+    if not conds or conds[0].get("type") != "starts_with":
+        return
+    text = re.sub(r'"[^"]*"', " ", request.lower())
+    if not any(w in text for w in START_WORDS):
+        conds[0]["type"] = "contains"
+        data["whole_input"] = False
+
+
 def _open_prefix(data, request):
     conds = data.get("conditions") or []
     if not data.get("whole_input") or not conds or conds[0].get("type") != "starts_with":
@@ -209,6 +235,39 @@ def _open_prefix(data, request):
     text = re.sub(r'"[^"]*"', " ", request.lower())   # מילים בתוך מרכאות הן ערכים, לא הוראות
     if not any(w in text for w in CLOSING_WORDS):
         data["whole_input"] = False
+
+
+WORD_TERMS   = ["מילה", "מילים", "word", "слов", "كلم"]
+LETTER_TERMS = ["אות", "letter", "букв", "حرف", "حروف"]
+
+
+def _fix_words(data, request):
+    """המודל מבלבל 'מילים' עם 'אותיות'. אם הבקשה מדברת על מילים ולא על אותיות — letters → words.
+    ואחרי words, ערך שבא אחריו הוא צמוד (literal), ומסביב ל-words תמיד יש רווח."""
+    text = re.sub(r'"[^"]*"', " ", request.lower())
+    conds = data.get("conditions") or []
+    if any(w in text for w in WORD_TERMS) and not any(w in text for w in LETTER_TERMS):
+        for c in conds:
+            if c.get("type") == "letters":
+                c["type"] = "words"
+
+    if not any(c.get("type") == "words" for c in conds):
+        return
+
+    for i, c in enumerate(conds):
+        if c.get("type") in ("contains", "contains_after") and i > 0 and conds[i - 1].get("type") in ("words", "space") \
+                and any(x.get("type") == "words" for x in conds[:i]):
+            c["type"] = "literal"
+
+    out = []
+    for i, c in enumerate(conds):
+        t = c.get("type")
+        if t == "words" and out and out[-1].get("type") != "space":
+            out.append({"type": "space", "value": None, "count": None})
+        if out and out[-1].get("type") == "words" and t not in ("space", "not_contains"):
+            out.append({"type": "space", "value": None, "count": None})
+        out.append(c)
+    data["conditions"] = out
 
 
 def _collapse_spaces(data):
@@ -247,6 +306,8 @@ def normalize_dsl(data, request: str):
             slot["value"] = symbol
 
     _fix_order(conditions, request)
+    _fix_start(data, request)
+    _fix_words(data, request)
     _collapse_spaces(data)
     _open_prefix(data, request)
     return data

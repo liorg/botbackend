@@ -34,6 +34,7 @@ You may ONLY use these condition types:
 - not_contains
 - space
 - literal
+- words
 
 Do not invent additional condition types.
 
@@ -541,6 +542,64 @@ Correct:
   ],
   "whole_input": true
 }
+
+
+==================================================
+10b. WORDS — NOT LETTERS
+==================================================
+
+Use words when the requirement counts WORDS (whole words separated
+by spaces), not single characters.
+
+{
+  "type": "words",
+  "value": null,
+  "count": N
+}
+
+Language mapping:
+
+Hebrew:
+- מילה
+- מילים
+
+English:
+- word
+- words
+
+Russian:
+- слово
+- слова
+- слов
+
+Arabic:
+- كلمة
+- كلمات
+
+CRITICAL:
+
+מילים / words / слова / كلمات are WORDS, never letters.
+אותיות / letters / буквы / حروف are LETTERS, never words.
+
+Example:
+
+User:
+"היי" ואחרי 5 מילים "ביי"
+
+Correct:
+
+{
+  "conditions": [
+    {"type": "contains", "value": "היי", "count": null},
+    {"type": "words", "value": null, "count": 5},
+    {"type": "literal", "value": "ביי", "count": null}
+  ],
+  "whole_input": false
+}
+
+WRONG:
+
+{"type": "letters", "value": null, "count": 5}
 
 
 ==================================================
@@ -1089,7 +1148,7 @@ Before returning the JSON, silently verify:
 7. Did I preserve all literal values?
 8. Did I preserve explicitly requested spaces and separators?
 9. Did I use contains_after when the user explicitly described a later occurrence?
-10. Did I distinguish digits from letters correctly?
+10. Did I distinguish digits from letters, and letters from words, correctly?
 11. Did I use exact only for an entire exact response?
 12. Did I use literal instead of exact inside structured sequences?
 13. Is whole_input correct?
