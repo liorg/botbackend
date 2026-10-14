@@ -99,10 +99,15 @@ def compile_condition(data: dict) -> str:
         return "^" + "".join(looks) + body + "$"
 
     chain, anchored, tail = "", False, ""
+    prev = None
     for i, c in enumerate(rest):
         t = c.get("type")
         nxt = rest[i + 1].get("type") if i + 1 < len(rest) else None
-        if t == "starts_with" and i == 0:
+        if t == "space":
+            chain += r"\s+"                       # כל סוג רווח (NBSP, טאב) — הודעות WhatsApp
+        elif t in ("digits", "letters", "one_of") and prev == "starts_with":
+            chain += r"\s*" + _component(c)       # "קוד1234" וגם "קוד 1234"
+        elif t == "starts_with" and i == 0:
             chain, anchored = escape_regex(c.get("value")), True
         elif t == "contains":
             if nxt == "contains_after":
@@ -117,6 +122,15 @@ def compile_condition(data: dict) -> str:
             return "^" + "".join(looks) + escape_regex(c.get("value")) + "$"
         else:
             chain += _component(c)
+        prev = t
+
+    # רצף שנגמר בכמות קבועה ופתוח בסוף — בדיוק N, לא N+1 ("קוד 12345" לא עובר על 4 ספרות)
+    if not tail and rest:
+        last = rest[-1]
+        if last.get("type") == "digits" and last.get("count") is not None:
+            chain += "(?![0-9])"
+        elif last.get("type") == "letters" and last.get("count") is not None:
+            chain += "(?!" + LETTER + ")"
 
     if tail and (chain or anchored):
         tail = ANY + tail
@@ -179,6 +193,24 @@ def _requested_symbols(request):
     return [s for _, s in sorted(found)]
 
 
+# מילים שסוגרות את הפורמט: בלעדיהן "מתחיל ב..." הוא קידומת, ומה שאחריה חופשי
+CLOSING_WORDS = [
+    "בדיוק", "רק", "בלבד", "שום דבר נוסף", "כלום אחרי",
+    "exactly", "only", "nothing else",
+    "только", "точно", "ровно",
+    "فقط", "بالضبط",
+]
+
+
+def _open_prefix(data, request):
+    conds = data.get("conditions") or []
+    if not data.get("whole_input") or not conds or conds[0].get("type") != "starts_with":
+        return
+    text = re.sub(r'"[^"]*"', " ", request.lower())   # מילים בתוך מרכאות הן ערכים, לא הוראות
+    if not any(w in text for w in CLOSING_WORDS):
+        data["whole_input"] = False
+
+
 def normalize_dsl(data, request: str):
     if not isinstance(data, dict) or not isinstance(data.get("conditions"), list):
         return data
@@ -205,4 +237,5 @@ def normalize_dsl(data, request: str):
             slot["value"] = symbol
 
     _fix_order(conditions, request)
+    _open_prefix(data, request)
     return data
