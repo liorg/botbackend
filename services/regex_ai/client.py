@@ -61,6 +61,60 @@ def _key(request: str) -> str:
     return re.sub(r"\s+", " ", request).strip()
 
 
+# ── Placeholders: {{payload.x}} ──────────────────────────────────────────────
+# ערך שה-Worker ממלא בזמן ריצה. המודל לא רואה אותו — לפני השליחה הוא מוחלף בטוקן
+# גנרי (PARAMA, PARAMB… — אותיות בלבד, כדי שלא ייקרא כספרות), ואחרי הקומפילציה
+# הטוקן חוזר להיות {{payload.x}} בתוך ה-regex. ה-Worker מציב את הערך (עם Regex.Escape).
+PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
+
+
+def _param_token(i: int) -> str:
+    return "PARAM" + "".join(chr(65 + d) for d in _base26(i))
+
+
+def _base26(i: int) -> list[int]:
+    out = []
+    while True:
+        out.append(i % 26)
+        i = i // 26 - 1
+        if i < 0:
+            return out[::-1]
+
+
+def mask_placeholders(request: str) -> tuple[str, dict[str, str]]:
+    """{{payload.x}} → "PARAMA". עוטף במרכאות אם המשתמש לא עטף — ערך קבוע תמיד במרכאות."""
+    params: dict[str, str] = {}
+    by_path: dict[str, str] = {}
+    out, last = [], 0
+    for m in PLACEHOLDER_RE.finditer(request):
+        path = m.group(1).strip()
+        token = by_path.get(path)
+        if token is None:
+            token = _param_token(len(by_path))
+            by_path[path] = token
+            params[token] = "{{" + path + "}}"
+        quoted = m.start() > 0 and request[m.start() - 1] == '"' and request[m.end():m.end() + 1] == '"'
+        out.append(request[last:m.start()])
+        out.append(token if quoted else f'"{token}"')
+        last = m.end()
+    out.append(request[last:])
+    return "".join(out), params
+
+
+def unmask(text, params: dict[str, str]):
+    if not params:
+        return text
+    if isinstance(text, str):
+        for token in sorted(params, key=len, reverse=True):   # PARAMAB לפני PARAMA
+            text = text.replace(token, params[token])
+        return text
+    if isinstance(text, list):
+        return [unmask(t, params) for t in text]
+    if isinstance(text, dict):
+        return {k: unmask(v, params) for k, v in text.items()}
+    return text
+
+
 def _extract_json(raw: str) -> str:
     raw = re.sub(r"<think>[\s\S]*?</think>", "", raw)
     start, end = raw.find("{"), raw.rfind("}")
@@ -119,14 +173,26 @@ async def generate_regex(request: str) -> dict:
         return {**_cache[key], "cached": True, "ms": 0}
 
     t0 = time.perf_counter()
-    dsl = normalize_dsl(await _ask_model(key), key)
+    masked, params = mask_placeholders(key)
+    dsl = normalize_dsl(await _ask_model(masked), masked)
     try:
         pattern = compile_condition(dsl)
-        re.compile(pattern)
+        re.compile(pattern)          # עם הטוקנים — {{…}} עדיין לא בפנים
     except (ValueError, re.error) as e:
         raise RegexAIError(f"Compile failed: {e}", 422, json.dumps(dsl, ensure_ascii=False))
 
-    result = {"regex": pattern, "conditions": dsl["conditions"], "whole_input": dsl["whole_input"]}
+    missing = [t for t in params if t not in pattern]
+    if missing:
+        raise RegexAIError(
+            "Placeholder lost: " + ", ".join(params[t] for t in missing), 422,
+            json.dumps(dsl, ensure_ascii=False))
+
+    result = {
+        "regex":       unmask(pattern, params),
+        "conditions":  unmask(dsl["conditions"], params),
+        "whole_input": dsl["whole_input"],
+        "params":      sorted(set(params.values())),   # מה ה-Worker צריך למלא
+    }
     _cache[key] = result
     if len(_cache) > CACHE_SIZE:
         _cache.popitem(last=False)

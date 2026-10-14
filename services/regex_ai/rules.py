@@ -1066,6 +1066,27 @@ H. ARABIC رقم
 In this context رقم / أرقام with a count ALWAYS means digits.
 
 
+I. PARAMETER TOKENS
+
+PARAMA, PARAMB, PARAMC … are runtime parameters (a name, a previous
+answer). Treat each one exactly like any other quoted literal value:
+copy it unchanged into "value". Never split it, translate it, or turn
+it into letters, digits or words.
+
+User:
+מתחיל ב"PARAMA" ואחריו 4 ספרות
+
+Correct:
+
+{
+  "conditions": [
+    {"type": "starts_with", "value": "PARAMA", "count": null},
+    {"type": "digits", "value": null, "count": 4}
+  ],
+  "whole_input": true
+}
+
+
 ==================================================
 16. OUTPUT STRUCTURE — CRITICAL
 ==================================================
