@@ -211,6 +211,16 @@ def _open_prefix(data, request):
         data["whole_input"] = False
 
 
+def _collapse_spaces(data):
+    """רווחים רצופים הם רווח אחד: space,space,space → \\s+ יחיד, לא \\s+\\s+\\s+ (שדורש 3 רווחים לפחות)."""
+    out = []
+    for c in data.get("conditions") or []:
+        if c.get("type") == "space" and out and out[-1].get("type") == "space":
+            continue
+        out.append(c)
+    data["conditions"] = out
+
+
 def normalize_dsl(data, request: str):
     if not isinstance(data, dict) or not isinstance(data.get("conditions"), list):
         return data
@@ -237,5 +247,6 @@ def normalize_dsl(data, request: str):
             slot["value"] = symbol
 
     _fix_order(conditions, request)
+    _collapse_spaces(data)
     _open_prefix(data, request)
     return data
