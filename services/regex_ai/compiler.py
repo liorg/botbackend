@@ -9,6 +9,9 @@ DIGIT = "[0-9]"         # \d תופס גם ספרות ערביות-הודיות
 LETTER = "[A-Za-zא-תء-يА-яЁё]"
 WORD = r"\S+"           # מילה = רצף בלי רווחים
 
+FIXED   = ("starts_with", "contains", "contains_after", "literal")   # ערך קבוע
+COUNTED = ("digits", "letters")                                     # רכיב עם כמות
+
 TYPES = ["starts_with", "ends_with", "contains", "contains_after",
          "exact", "digits", "letters", "one_of", "not_contains",
          "space", "literal", "words"]
@@ -112,8 +115,10 @@ def compile_condition(data: dict) -> str:
         nxt = rest[i + 1].get("type") if i + 1 < len(rest) else None
         if t == "space":
             chain += r"\s+"                       # כל סוג רווח (NBSP, טאב) — הודעות WhatsApp
-        elif t in ("digits", "letters", "one_of") and prev == "starts_with":
+        elif t in ("digits", "letters", "one_of") and prev in FIXED:
             chain += r"\s*" + _component(c)       # "קוד1234" וגם "קוד 1234"
+        elif t == "literal" and prev in COUNTED:
+            chain += r"\s*" + _component(c)       # "אבגדה ביי" וגם "אבגדהביי"
         elif t == "starts_with" and i == 0:
             chain, anchored = escape_regex(c.get("value")), True
         elif t == "contains":
@@ -251,13 +256,18 @@ def _fix_words(data, request):
             if c.get("type") == "letters":
                 c["type"] = "words"
 
+    # "ואחרי 5 מילים/אותיות/ספרות X" — X בא מיד אחרי הרכיב הספור, לא איפשהו בהמשך
+    for i, c in enumerate(conds):
+        if c.get("type") not in ("contains", "contains_after") or i == 0:
+            continue
+        j = i - 1
+        while j >= 0 and conds[j].get("type") == "space":
+            j -= 1
+        if j >= 0 and conds[j].get("type") in ("words", "letters", "digits"):
+            c["type"] = "literal"
+
     if not any(c.get("type") == "words" for c in conds):
         return
-
-    for i, c in enumerate(conds):
-        if c.get("type") in ("contains", "contains_after") and i > 0 and conds[i - 1].get("type") in ("words", "space") \
-                and any(x.get("type") == "words" for x in conds[:i]):
-            c["type"] = "literal"
 
     out = []
     for i, c in enumerate(conds):
