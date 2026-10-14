@@ -1,0 +1,208 @@
+# services/regex_ai/compiler.py
+# JSON תנאים → regex. אותו קוד שעבר את ה-POC, בלי שינוי לוגי.
+# הפלט עובד גם ב-Python re וגם ב-.NET Regex (ה-Worker).
+import re
+import unicodedata
+
+ANY = r"[\s\S]*"        # '.' לא חוצה שורות — הודעות WhatsApp יכולות להיות רב-שורתיות
+DIGIT = "[0-9]"         # \d תופס גם ספרות ערביות-הודיות
+LETTER = "[A-Za-zא-תء-يА-яЁё]"
+
+TYPES = ["starts_with", "ends_with", "contains", "contains_after",
+         "exact", "digits", "letters", "one_of", "not_contains",
+         "space", "literal"]
+
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "conditions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "enum": TYPES},
+                    "value": {"anyOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                        {"type": "null"},
+                    ]},
+                    "count": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+                },
+                "required": ["type", "value", "count"],
+                "additionalProperties": False,
+            },
+        },
+        "whole_input": {"type": "boolean"},
+    },
+    "required": ["conditions", "whole_input"],
+    "additionalProperties": False,
+}
+
+SEPARATORS = {"hyphen": "-", "colon": ":", "slash": "/"}
+
+
+def escape_regex(value):
+    if value is None:
+        return ""
+    return re.sub(r'([.*+?^${}()|[\]\\])', r'\\\1', value)
+
+
+def _quant(count, kind):
+    if count is None:
+        return "+"
+    if not isinstance(count, int) or count < 1:
+        raise ValueError(f"Invalid {kind} count: {count}")
+    return f"{{{count}}}"
+
+
+def _component(c):
+    t, value, count = c.get("type"), c.get("value"), c.get("count")
+    if t in ("starts_with", "literal", "exact", "contains", "contains_after", "ends_with"):
+        return escape_regex(value)
+    if t == "space":
+        return " "
+    if t == "digits":
+        return DIGIT + _quant(count, "digits")
+    if t == "letters":
+        return LETTER + _quant(count, "letters")
+    if t == "one_of":
+        if not isinstance(value, list) or not value:
+            raise ValueError("one_of requires values")
+        return "(?:" + "|".join(escape_regex(v) for v in value) + ")"
+    if t == "separator":
+        symbol = SEPARATORS.get(value)
+        if symbol is None:
+            raise ValueError(f"Unsupported separator: {value}")
+        return escape_regex(symbol)
+    raise ValueError(f"Unsupported condition type: {t}")
+
+
+def compile_condition(data: dict) -> str:
+    conditions = data.get("conditions", [])
+    whole_input = data.get("whole_input", False)
+
+    looks = ["(?!" + ANY + escape_regex(c.get("value")) + ")"
+             for c in conditions if c.get("type") == "not_contains"]
+    rest = [c for c in conditions if c.get("type") != "not_contains"]
+
+    if whole_input:
+        body = ""
+        for c in rest:
+            t = c.get("type")
+            if t in ("contains", "contains_after"):
+                body += ANY + _component(c) + ANY
+            elif t == "ends_with":
+                body += ANY + _component(c)
+            else:
+                body += _component(c)
+        return "^" + "".join(looks) + body + "$"
+
+    chain, anchored, tail = "", False, ""
+    for i, c in enumerate(rest):
+        t = c.get("type")
+        nxt = rest[i + 1].get("type") if i + 1 < len(rest) else None
+        if t == "starts_with" and i == 0:
+            chain, anchored = escape_regex(c.get("value")), True
+        elif t == "contains":
+            if nxt == "contains_after":
+                chain += (ANY if chain else "") + escape_regex(c.get("value"))
+            else:
+                looks.append("(?=" + ANY + escape_regex(c.get("value")) + ")")
+        elif t == "contains_after":
+            chain += ANY + escape_regex(c.get("value"))
+        elif t == "ends_with":
+            tail = escape_regex(c.get("value")) + "$"
+        elif t == "exact":
+            return "^" + "".join(looks) + escape_regex(c.get("value")) + "$"
+        else:
+            chain += _component(c)
+
+    if tail and (chain or anchored):
+        tail = ANY + tail
+    if anchored:
+        return "^" + "".join(looks) + chain + tail
+    if looks:
+        return "^" + "".join(looks) + (ANY if (chain or tail) else "") + chain + tail
+    return chain + tail
+
+
+# ── normalize: תיקונים דטרמיניסטיים לטעויות המודל ──────────────────────────
+
+SYMBOL_WORDS = sorted({
+    "נקודתיים": ":", "מקף": "-", "לוכסן": "/", "נקודה": ".", "קו תחתון": "_", "שטרודל": "@",
+    "colon": ":", "hyphen": "-", "dash": "-", "slash": "/", "dot": ".", "period": ".",
+    "underscore": "_", "at sign": "@",
+    "двоеточие": ":", "дефис": "-", "тире": "-", "слэш": "/", "точка": ".",
+    "подчёркивание": "_", "собака": "@",
+    "نقطتان": ":", "شرطة مائلة": "/", "شرطة سفلية": "_", "شرطة": "-", "نقطة": ".",
+}.items(), key=lambda kv: -len(kv[0]))
+
+# "а затем" (#67 ב-POC) נתפס ע"י "затем"; "ואז" ע"י עצמו.
+ORDER_WORDS = [
+    "בהמשך", "אחר כך", "לאחר מכן", "מאוחר יותר", "ואז", "אחרי זה",
+    "later", "afterwards", "after that", "then",
+    "позже", "затем", "после этого", "потом",
+    "لاحقًا", "لاحقا", "بعد ذلك", "ثم",
+]
+
+
+def _is_symbol(v):
+    return isinstance(v, str) and len(v) == 1 and unicodedata.category(v)[0] in ("P", "S")
+
+
+def _fix_order(conditions, request):
+    text = request.lower()
+    prev_end = None
+    for c in conditions:
+        v = c.get("value")
+        if not isinstance(v, str) or not v:
+            continue
+        pos = text.find(v.lower(), prev_end or 0)
+        if pos == -1:
+            continue
+        if c.get("type") == "contains" and prev_end is not None:
+            if any(w in text[prev_end:pos] for w in ORDER_WORDS):
+                c["type"] = "contains_after"
+        prev_end = pos + len(v)
+
+
+def _requested_symbols(request):
+    text = re.sub(r'"[^"]*"', lambda m: " " * len(m.group()), request.lower())
+    found, taken = [], [False] * len(text)
+    for word, symbol in SYMBOL_WORDS:
+        for m in re.finditer(re.escape(word.lower()), text):
+            if not any(taken[m.start():m.end()]):
+                found.append((m.start(), symbol))
+                for k in range(m.start(), m.end()):
+                    taken[k] = True
+    return [s for _, s in sorted(found)]
+
+
+def normalize_dsl(data, request: str):
+    if not isinstance(data, dict) or not isinstance(data.get("conditions"), list):
+        return data
+    conditions = data["conditions"]
+
+    for c in conditions:
+        if c.get("type") == "one_of" and isinstance(c.get("value"), list) and len(c["value"]) == 1:
+            c["value"] = c["value"][0]
+            if len(conditions) == 1:
+                c["type"] = "exact"
+                data["whole_input"] = True
+            else:
+                c["type"] = "literal"
+
+    for c in conditions:
+        if c.get("type") == "separator":
+            c["type"] = "literal"
+            c["value"] = SEPARATORS.get(c.get("value"), c.get("value"))
+
+    requested = _requested_symbols(request)
+    slots = [c for c in conditions if c.get("type") == "literal" and _is_symbol(c.get("value"))]
+    if requested and len(requested) == len(slots):
+        for slot, symbol in zip(slots, requested):
+            slot["value"] = symbol
+
+    _fix_order(conditions, request)
+    return data
