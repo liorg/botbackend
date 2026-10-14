@@ -251,10 +251,15 @@ def _fix_words(data, request):
     ואחרי words, ערך שבא אחריו הוא צמוד (literal), ומסביב ל-words תמיד יש רווח."""
     text = re.sub(r'"[^"]*"', " ", request.lower())
     conds = data.get("conditions") or []
-    if any(w in text for w in WORD_TERMS) and not any(w in text for w in LETTER_TERMS):
+    has_word, has_letter = any(w in text for w in WORD_TERMS), any(w in text for w in LETTER_TERMS)
+    if has_word and not has_letter:
         for c in conds:
             if c.get("type") == "letters":
                 c["type"] = "words"
+    elif has_letter and not has_word:                    # ובכיוון ההפוך: "אותיות" שהמודל קרא כמילים
+        for c in conds:
+            if c.get("type") == "words":
+                c["type"] = "letters"
 
     # "ואחרי 5 מילים/אותיות/ספרות X" — X בא מיד אחרי הרכיב הספור, לא איפשהו בהמשך
     for i, c in enumerate(conds):
