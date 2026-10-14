@@ -242,8 +242,20 @@ def _open_prefix(data, request):
         data["whole_input"] = False
 
 
-WORD_TERMS   = ["מילה", "מילים", "word", "слов", "كلم"]
-LETTER_TERMS = ["אות", "letter", "букв", "حرف", "حروف"]
+# מונחים לזיהוי "מילים" מול "אותיות" בבקשה — 4 שפות.
+# עברית: "אות" רק כמילה שלמה (עם תחילית ו/ב/ה/ל/מ/ש/כ), אחרת "אותו"/"אותה" היו נתפסים כאותיות.
+WORD_RE = re.compile(
+    r"(?<![א-ת])[ובהלמשכ]?(?:מילה|מילים)"                 # he
+    r"|\bwords?\b"                                       # en
+    r"|слов"                                              # ru: слово / слова / слов / словами
+    r"|كلم"                                               # ar: كلمة / كلمات
+)
+LETTER_RE = re.compile(
+    r"(?<![א-ת])[ובהלמשכ]?(?:אותיות|אות)(?![א-ת])"      # he
+    r"|\bletters?\b|\bcharacters?\b|\bchars?\b"       # en
+    r"|букв|символ"                                       # ru: буква / буквы / букв / символов
+    r"|حرف|حروف|أحرف"                                     # ar
+)
 
 
 def _fix_words(data, request):
@@ -251,7 +263,7 @@ def _fix_words(data, request):
     ואחרי words, ערך שבא אחריו הוא צמוד (literal), ומסביב ל-words תמיד יש רווח."""
     text = re.sub(r'"[^"]*"', " ", request.lower())
     conds = data.get("conditions") or []
-    has_word, has_letter = any(w in text for w in WORD_TERMS), any(w in text for w in LETTER_TERMS)
+    has_word, has_letter = bool(WORD_RE.search(text)), bool(LETTER_RE.search(text))
     if has_word and not has_letter:
         for c in conds:
             if c.get("type") == "letters":
