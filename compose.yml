@@ -1,17 +1,14 @@
 version: "3.8"
 
-x-regex-ai-env: &regex-ai-env
-  REGEX_AI_BASE_URL: ${REGEX_AI_BASE_URL:-https://ai-dev.grossmanbot.download/v1}
-  REGEX_AI_MODEL: ${REGEX_AI_MODEL:-Qwen/Qwen3-4B-AWQ}
-  REGEX_AI_TIMEOUT: "30"
-  CF_ACCESS_CLIENT_ID: ${CF_ACCESS_CLIENT_ID}
-  CF_ACCESS_CLIENT_SECRET: ${CF_ACCESS_CLIENT_SECRET}
-
 services:
   grossman-api:
     image: liorgr/scenariobot-api:latest
     environment:
-      <<: *regex-ai-env
+      REGEX_AI_BASE_URL: ${REGEX_AI_BASE_URL:-https://ai-dev.grossmanbot.download/v1}
+      REGEX_AI_MODEL: ${REGEX_AI_MODEL:-Qwen/Qwen3-4B-AWQ}
+      REGEX_AI_TIMEOUT: "30"
+      CF_ACCESS_CLIENT_ID: ${CF_ACCESS_CLIENT_ID}
+      CF_ACCESS_CLIENT_SECRET: ${CF_ACCESS_CLIENT_SECRET}
       SUPABASE_URL: ${SUPABASE_URL}
       SUPABASE_ANON_KEY: ${SUPABASE_KEY}
       JWT_SECRET: ${JWT_SECRET}
@@ -38,7 +35,11 @@ services:
     image: liorgr/scenariobot-api:latest
 
     environment:
-      <<: *regex-ai-env
+      REGEX_AI_BASE_URL: ${REGEX_AI_BASE_URL:-https://ai-dev.grossmanbot.download/v1}
+      REGEX_AI_MODEL: ${REGEX_AI_MODEL:-Qwen/Qwen3-4B-AWQ}
+      REGEX_AI_TIMEOUT: "30"
+      CF_ACCESS_CLIENT_ID: ${CF_ACCESS_CLIENT_ID}
+      CF_ACCESS_CLIENT_SECRET: ${CF_ACCESS_CLIENT_SECRET}
       SUPABASE_URL: ${SUPABASE_URL}
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
       JWT_SECRET: ${JWT_SECRET}
