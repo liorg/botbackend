@@ -18,8 +18,12 @@ class RegexTestRequest(BaseModel):
     samples: list[str] = Field(..., max_length=20)
 
 
+PLACEHOLDER_RE = re.compile(r"\{\{\s*[^{}]+?\s*\}\}")
+
+
 def _test(pattern: str, samples: list[str]) -> list[dict]:
-    rx = re.compile(pattern)
+    # {{payload.x}} מתמלא רק בזמן ריצה — בבדיקה הוא "כל מילה"
+    rx = re.compile(PLACEHOLDER_RE.sub(lambda _: r"\S+", pattern))
     return [{"text": s, "match": bool(rx.search(s))} for s in samples]
 
 
