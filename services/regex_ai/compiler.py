@@ -12,6 +12,16 @@ WORD = r"\S+"           # מילה = רצף בלי רווחים
 FIXED   = ("starts_with", "contains", "contains_after", "literal")   # ערך קבוע
 COUNTED = ("digits", "letters")                                     # רכיב עם כמות
 
+END_TRAIL = r"[\s.!?…]*"   # סוף הודעה סובל רווח/פיסוק אחרון: "ביי!" "ביי." "ביי "
+
+
+def _end(value, scope):
+    """סוף ההודעה ($) או סוף משפט — אחרי הערך בא סימן פיסוק סוגר, שורה חדשה או סוף."""
+    v = escape_regex(value)
+    if scope == "sentence":
+        return v + r"(?=\s*(?:[.!?…]|\n|$))"
+    return v + END_TRAIL + "$"
+
 TYPES = ["starts_with", "ends_with", "contains", "contains_after",
          "exact", "digits", "letters", "one_of", "not_contains",
          "space", "literal", "words"]
@@ -103,7 +113,8 @@ def compile_condition(data: dict) -> str:
             if t in ("contains", "contains_after"):
                 body += ANY + _component(c) + ANY
             elif t == "ends_with":
-                body += ANY + _component(c)
+                body += ANY + _end(c.get("value"), c.get("scope"))
+                return "^" + "".join(looks) + body
             else:
                 body += _component(c)
         return "^" + "".join(looks) + body + "$"
@@ -122,14 +133,14 @@ def compile_condition(data: dict) -> str:
         elif t == "starts_with" and i == 0:
             chain, anchored = escape_regex(c.get("value")), True
         elif t == "contains":
-            if nxt in ("contains_after", "space", "words", "literal", "digits", "letters", "one_of"):
+            if nxt in ("contains_after", "space", "words", "literal", "digits", "letters", "one_of", "ends_with"):
                 chain += (ANY if chain else "") + escape_regex(c.get("value"))
             else:
                 looks.append("(?=" + ANY + escape_regex(c.get("value")) + ")")
         elif t == "contains_after":
             chain += ANY + escape_regex(c.get("value"))
         elif t == "ends_with":
-            tail = escape_regex(c.get("value")) + "$"
+            tail = _end(c.get("value"), c.get("scope"))
         elif t == "exact":
             return "^" + "".join(looks) + escape_regex(c.get("value")) + "$"
         else:
@@ -258,6 +269,54 @@ LETTER_RE = re.compile(
 )
 
 
+# "מספר מילים" / "כמה" / several — בלי מספר בבקשה, הכמות פתוחה (אחד או יותר)
+NUMBER_RE = re.compile(
+    r"\d"
+    r"|(?<![א-ת])[ובהלמשכ]?(?:אחת|אחד|שתיים|שתי|שניים|שני|שלוש|שלושה|ארבע|ארבעה|חמש|חמישה|שש|שישה|שבע|שבעה|שמונה|תשע|תשעה|עשר|עשרה)(?![א-ת])"
+    r"|\b(?:one|two|three|four|five|six|seven|eight|nine|ten)\b"
+    r"|\b(?:один|одно|одна|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять)\b"
+    r"|(?:واحد|اثنان|اثنين|ثلاث|أربع|خمس|ست|سبع|ثمان|تسع|عشر)"
+)
+
+# "בסוף" — הערך הוא סוף ההודעה; "סוף המשפט" — סוף משפט, גם באמצע הודעה עם כמה משפטים
+END_RE      = re.compile(r"בסוף|ובסוף|at the end|ends? with|в конце|заканчива|في نهاية|ينتهي|تنتهي")
+SENTENCE_RE = re.compile(r"(?:סוף|בסוף|ובסוף)\s+(?:ה)?משפט|end of (?:the |a )?sentence|конце предложения|نهاية الجملة")
+
+
+def _fix_counts(data, request):
+    text = re.sub(r'"[^"]*"', " ", request.lower())
+    if NUMBER_RE.search(text):
+        return
+    for c in data.get("conditions") or []:
+        if c.get("type") in ("words", "letters", "digits") and c.get("count") is not None:
+            c["count"] = None   # המודל המציא מספר
+
+
+def _fix_end(data, request):
+    """ערך שבתיאור בא אחרי 'בסוף' — ends_with, גם אם המודל החזיר contains/literal."""
+    text = request.lower()
+    conds = data.get("conditions") or []
+    sentence = bool(SENTENCE_RE.search(re.sub(r'"[^"]*"', " ", text)))
+    for c in conds:
+        v = c.get("value")
+        if not isinstance(v, str) or not v:
+            continue
+        pos = text.find('"' + v.lower() + '"')
+        if pos == -1:
+            continue
+        before = text[max(0, pos - 25):pos]
+        if c.get("type") in ("contains", "contains_after", "literal", "ends_with") and (END_RE.search(before) or c.get("type") == "ends_with"):
+            c["type"] = "ends_with"
+            if sentence:
+                c["scope"] = "sentence"
+    # ends_with הוא תמיד האחרון ברצף
+    ends = [c for c in conds if c.get("type") == "ends_with"]
+    if ends:
+        data["conditions"] = [c for c in conds if c.get("type") != "ends_with"] + ends[-1:]
+        if not sentence:
+            data["whole_input"] = False
+
+
 def _fix_words(data, request):
     """המודל מבלבל 'מילים' עם 'אותיות'. אם הבקשה מדברת על מילים ולא על אותיות — letters → words.
     ואחרי words, ערך שבא אחריו הוא צמוד (literal), ומסביב ל-words תמיד יש רווח."""
@@ -335,6 +394,8 @@ def normalize_dsl(data, request: str):
     _fix_order(conditions, request)
     _fix_start(data, request)
     _fix_words(data, request)
+    _fix_counts(data, request)
+    _fix_end(data, request)
     _collapse_spaces(data)
     _open_prefix(data, request)
     return data
