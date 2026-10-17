@@ -1,6 +1,6 @@
 """
 auth.py — FastAPI router
-User authentication, profile settings and avatar storage.
+User authentication, profile settings, avatar storage and 2FA (WhatsApp OTP).
 
 Token policy
 ------------
@@ -12,16 +12,28 @@ was accepted, uid resolved to the email address.
 
 Authentication and the Supabase client both come from dependencies.py.
 Nothing in this file creates a Supabase client per request.
+
+2FA
+---
+two_factor_verified is server-managed: the DB trigger users_guard_2fa resets
+it on any mobile change and blocks anyone but service_role from setting it.
+OTP codes live in user_otp (service_role only) as an HMAC. POST /2fa/request
+does not send anything: it inserts a pending row into request_otp, and a
+separate job sends it on WhatsApp.
 """
 
+import hashlib
+import hmac
 import os
+import re
+import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from supabase import Client
 
 from dependencies import (
@@ -51,16 +63,42 @@ AVATAR_EXTENSIONS = {
     "image/webp": "webp",
 }
 
+SUPPORTED_LANGS = {"he", "en", "ru", "ar"}
+
+# ── 2FA / OTP ─────────────────────────────────────────────────────────────────
+OTP_TTL_SEC = int(os.getenv("OTP_TTL_SEC", "300"))
+OTP_RESEND_SEC = int(os.getenv("OTP_RESEND_SEC", "60"))
+OTP_MAX_ATTEMPTS = int(os.getenv("OTP_MAX_ATTEMPTS", "5"))
+OTP_SECRET = os.getenv("OTP_SECRET", "")
+# Sending is done by a separate job that reads request_otp (status='pending').
+
+OTP_TEXT = {
+    "he": "קוד האימות שלך ב-Grossman.Bot: {code}\nהקוד תקף ל-{minutes} דקות. אין להעביר אותו לאף אחד.",
+    "en": "Your Grossman.Bot verification code: {code}\nValid for {minutes} minutes. Do not share it with anyone.",
+    "ru": "Ваш код подтверждения Grossman.Bot: {code}\nДействует {minutes} мин. Никому его не сообщайте.",
+    "ar": "رمز التحقق الخاص بك في Grossman.Bot: {code}\nصالح لمدة {minutes} دقائق. لا تشاركه مع أي شخص.",
+}
+
+DOMAIN_RE = re.compile(
+    r"^(\*\.)?(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+)
+
 # Columns returned to a browser. Never replace with select("*"): the users
 # table also carries provider ids and internal billing flags.
 USER_COLUMNS = (
     "id, email, name, mobile, lang, avatar, package_type, "
+    "two_factor_verified, two_factor_verified_at, "
+    "trusted_domain, notify_email, notify_errors_only, "
     "created_at, updated_at"
 )
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_ts(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def _public_db() -> Client:
@@ -182,7 +220,7 @@ class SignupRequest(BaseModel):
     email: EmailStr = Field(..., description="Email address to register.")
     password: str = Field(..., min_length=6, description="Password, at least 6 characters.")
     name: Optional[str] = Field(None, max_length=120, description="Display name.")
-    lang: str = Field("he", max_length=5, description="UI language code, for example he or en.")
+    lang: str = Field("he", max_length=5, description="UI language code: he, en, ru or ar.")
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -190,15 +228,45 @@ class ForgotPasswordRequest(BaseModel):
 
 
 class UpdateSettingsRequest(BaseModel):
-    # Two fields are deliberately absent:
-    #   package_type — a billing field; accepting it let any caller upgrade
-    #                  their own plan with a PUT.
-    #   avatar       — writable only through POST /auth/avatar, so the stored
-    #                  URL is always one this backend uploaded to GCS and never
-    #                  an arbitrary URL supplied by the client.
+    # Fields deliberately absent:
+    #   package_type        — billing field; accepting it let any caller upgrade
+    #                         their own plan with a PUT.
+    #   avatar              — writable only through POST /auth/avatar.
+    #   two_factor_verified — set only by POST /auth/2fa/verify.
     full_name: Optional[str] = Field(None, max_length=120, description="Display name.")
-    mobile: Optional[str] = Field(None, max_length=32, description="Mobile number.")
-    lang: Optional[str] = Field(None, max_length=5, description="UI language code.")
+    mobile: Optional[str] = Field(
+        None, max_length=32,
+        description="Mobile number. Changing it resets two_factor_verified.",
+    )
+    lang: Optional[str] = Field(None, max_length=5, description="UI language code: he, en, ru or ar.")
+    trusted_domain: Optional[str] = Field(
+        None, max_length=253,
+        description="Trusted domain, e.g. example.com or *.example.com. Empty string clears it.",
+    )
+    notify_email: Optional[bool] = Field(None, description="Send notifications by email.")
+    notify_errors_only: Optional[bool] = Field(
+        None, description="When notify_email is on: true = errors only, false = every notification.",
+    )
+
+    @field_validator("lang")
+    @classmethod
+    def _lang(cls, v):
+        if v is not None and v not in SUPPORTED_LANGS:
+            raise ValueError("lang must be one of: he, en, ru, ar")
+        return v
+
+    @field_validator("trusted_domain")
+    @classmethod
+    def _domain(cls, v):
+        if v is None:
+            return v
+        v = v.strip().lower()
+        v = re.sub(r"^https?://", "", v).rstrip("/")
+        if v == "":
+            return ""
+        if not DOMAIN_RE.match(v):
+            raise ValueError("invalid domain")
+        return v
 
 
 class UserPublic(BaseModel):
@@ -226,6 +294,11 @@ class SettingsResponse(BaseModel):
     lang: str = Field("he", description="UI language code.")
     avatar: str = Field("", description="Avatar URL.")
     package_type: str = Field("basic", description="Billing plan. Read-only on this API.")
+    two_factor_verified: bool = Field(False, description="Mobile verified by WhatsApp OTP.")
+    two_factor_verified_at: Optional[str] = Field(None, description="Verification time, ISO 8601.")
+    trusted_domain: str = Field("", description="Trusted domain.")
+    notify_email: bool = Field(False, description="Send notifications by email.")
+    notify_errors_only: bool = Field(True, description="Email errors only (when notify_email is on).")
     created_at: Optional[str] = Field(None, description="Row creation timestamp, ISO 8601.")
     updated_at: Optional[str] = Field(None, description="Last update timestamp, ISO 8601.")
 
@@ -242,6 +315,23 @@ class AvatarUploadResponse(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str = Field(..., description="Human-readable result.")
+
+
+class OtpRequestResponse(BaseModel):
+    message: str = Field(..., description="Human-readable result.")
+    sent_to: str = Field(..., description="Masked destination number.")
+    expires_in: int = Field(..., description="Seconds until the code expires.")
+    resend_in: int = Field(..., description="Seconds until a new code may be requested.")
+
+
+class OtpVerifyRequest(BaseModel):
+    code: str = Field(..., pattern=r"^\d{6}$", description="The 6-digit code received on WhatsApp.")
+
+
+class OtpVerifyResponse(BaseModel):
+    message: str = Field(..., description="Human-readable result.")
+    two_factor_verified: bool = Field(..., description="Always true on success.")
+    verified_at: str = Field(..., description="Verification time, ISO 8601.")
 
 
 class MeResponse(BaseModel):
@@ -293,6 +383,29 @@ def _upsert_user_row(db: Client, user, name: Optional[str] = None) -> dict:
 
     result = db.table("users").select(USER_COLUMNS).eq("id", str(user.id)).execute()
     return result.data[0] if result.data else {}
+
+
+def _normalize_mobile(raw: Optional[str]) -> str:
+    """Digits only, international form. 05x… → 9725x…, 00… → …"""
+    digits = re.sub(r"\D", "", raw or "")
+    if digits.startswith("00"):
+        digits = digits[2:]
+    elif digits.startswith("0"):
+        digits = "972" + digits[1:]
+    return digits
+
+
+def _mask_mobile(digits: str) -> str:
+    return f"+{digits[:3]}…{digits[-3:]}" if len(digits) > 6 else "+" + digits
+
+
+def _otp_hash(user_id: str, code: str) -> str:
+    if not OTP_SECRET:
+        logger.error("OTP_SECRET is not set")
+        raise HTTPException(status_code=503, detail="אימות דו-שלבי לא מוגדר בשרת")
+    return hmac.new(
+        OTP_SECRET.encode(), f"{user_id}:{code}".encode(), hashlib.sha256
+    ).hexdigest()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -474,9 +587,9 @@ async def forgot_password(request: ForgotPasswordRequest):
     response_model=SettingsResponse,
     summary="Get my profile settings",
     description=(
-        "Returns the profile of the authenticated user. If no avatar is stored "
-        "yet, the Google picture from the auth metadata is mirrored to GCS and "
-        "saved on the way out."
+        "Returns the profile of the authenticated user, including 2FA status, "
+        "trusted domain and notification preferences. If no avatar is stored "
+        "yet, the Google picture from the auth metadata is mirrored to GCS."
     ),
 )
 async def get_settings(
@@ -511,6 +624,11 @@ async def get_settings(
         lang=row.get("lang") or "he",
         avatar=avatar,
         package_type=row.get("package_type") or "basic",
+        two_factor_verified=bool(row.get("two_factor_verified")),
+        two_factor_verified_at=row.get("two_factor_verified_at"),
+        trusted_domain=row.get("trusted_domain") or "",
+        notify_email=bool(row.get("notify_email")),
+        notify_errors_only=row.get("notify_errors_only") is not False,
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
     )
@@ -521,9 +639,9 @@ async def get_settings(
     response_model=UpdateSettingsResponse,
     summary="Update my profile settings",
     description=(
-        "Updates name, mobile or language for the authenticated user. The "
-        "avatar is set through POST /auth/avatar, and package_type is a "
-        "billing field that cannot be changed through this API."
+        "Updates name, mobile, language, trusted domain and notification "
+        "preferences. Changing mobile resets two_factor_verified (DB trigger). "
+        "The avatar is set through POST /auth/avatar; package_type cannot be changed."
     ),
 )
 async def update_settings(
@@ -538,6 +656,8 @@ async def update_settings(
     patch = body.model_dump(exclude_none=True)
     if "full_name" in patch:
         patch["name"] = patch.pop("full_name")
+    if patch.get("trusted_domain") == "":
+        patch["trusted_domain"] = None
 
     if not patch:
         return UpdateSettingsResponse(message="אין שינויים לעדכון", updated={})
@@ -558,6 +678,151 @@ async def update_settings(
         "fields": list(patch.keys()),
     })
     return UpdateSettingsResponse(message="ההגדרות עודכנו בהצלחה", updated=patch)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 2FA — WhatsApp OTP
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.post(
+    "/2fa/request",
+    response_model=OtpRequestResponse,
+    summary="Send a 6-digit verification code to my mobile on WhatsApp",
+    description=(
+        "Sends a code to the mobile number stored in settings. The code is valid "
+        f"for {OTP_TTL_SEC}s, a new one can be requested after {OTP_RESEND_SEC}s, "
+        f"and {OTP_MAX_ATTEMPTS} wrong attempts invalidate it."
+    ),
+)
+async def request_2fa(
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    user_id = user["uid"]
+
+    res = db.table("users").select("mobile, lang").eq("id", user_id).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="משתמש לא נמצא")
+
+    mobile = _normalize_mobile(res.data[0].get("mobile"))
+    if len(mobile) < 9:
+        raise HTTPException(status_code=400, detail="יש להזין מספר נייד תקין ולשמור")
+
+    lang = res.data[0].get("lang") or "he"
+    sdb = _public_db()
+    now = datetime.now(timezone.utc)
+
+    prev = sdb.table("user_otp").select("sent_at").eq("user_id", user_id).execute()
+    if prev.data:
+        elapsed = (now - _parse_ts(prev.data[0]["sent_at"])).total_seconds()
+        if elapsed < OTP_RESEND_SEC:
+            wait = int(OTP_RESEND_SEC - elapsed) + 1
+            raise HTTPException(status_code=429, detail=f"ניתן לבקש קוד חדש בעוד {wait} שניות")
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    expires_at = (now + timedelta(seconds=OTP_TTL_SEC)).isoformat()
+
+    # user_otp — what verify checks (hash only)
+    sdb.table("user_otp").upsert({
+        "user_id": user_id,
+        "mobile": mobile,
+        "code_hash": _otp_hash(user_id, code),
+        "attempts": 0,
+        "sent_at": now.isoformat(),
+        "expires_at": expires_at,
+    }, on_conflict="user_id").execute()
+
+    # request_otp — the queue the job reads. Older pending rows are cancelled,
+    # so the job never sends a code that has already been replaced.
+    sdb.table("request_otp").update({"status": "cancelled", "code": None, "message": None}) \
+        .eq("user_id", user_id).eq("status", "pending").execute()
+
+    text = OTP_TEXT.get(lang, OTP_TEXT["he"]).format(
+        code=code, minutes=max(1, OTP_TTL_SEC // 60)
+    )
+    sdb.table("request_otp").insert({
+        "user_id": user_id,
+        "mobile": mobile,
+        "lang": lang,
+        "code": code,
+        "message": text,
+        "status": "pending",
+        "expires_at": expires_at,
+    }).execute()
+
+    logger.info("2FA code queued", extra={"action": "otp_queued", "user_id": user_id})
+    return OtpRequestResponse(
+        message="הקוד יישלח ב-WhatsApp",
+        sent_to=_mask_mobile(mobile),
+        expires_in=OTP_TTL_SEC,
+        resend_in=OTP_RESEND_SEC,
+    )
+
+
+@router.post(
+    "/2fa/verify",
+    response_model=OtpVerifyResponse,
+    summary="Verify the 6-digit code and mark my mobile as verified",
+    description=(
+        "Compares the code against the active OTP. Fails if the code expired, "
+        "the attempts ran out, or the mobile changed after the code was sent."
+    ),
+)
+async def verify_2fa(
+    body: OtpVerifyRequest,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    user_id = user["uid"]
+    sdb = _public_db()
+    now = datetime.now(timezone.utc)
+
+    res = sdb.table("user_otp").select("*").eq("user_id", user_id).execute()
+    if not res.data:
+        raise HTTPException(status_code=400, detail="אין קוד פעיל — בקש קוד חדש")
+    otp = res.data[0]
+
+    def _drop():
+        sdb.table("user_otp").delete().eq("user_id", user_id).execute()
+
+    if now > _parse_ts(otp["expires_at"]):
+        _drop()
+        raise HTTPException(status_code=400, detail="הקוד פג תוקף — בקש קוד חדש")
+
+    if otp["attempts"] >= OTP_MAX_ATTEMPTS:
+        _drop()
+        raise HTTPException(status_code=429, detail="יותר מדי ניסיונות — בקש קוד חדש")
+
+    if not hmac.compare_digest(otp["code_hash"], _otp_hash(user_id, body.code)):
+        attempts = otp["attempts"] + 1
+        left = OTP_MAX_ATTEMPTS - attempts
+        if left <= 0:
+            _drop()
+            raise HTTPException(status_code=429, detail="יותר מדי ניסיונות — בקש קוד חדש")
+        sdb.table("user_otp").update({"attempts": attempts}).eq("user_id", user_id).execute()
+        raise HTTPException(status_code=400, detail=f"קוד שגוי. נותרו {left} ניסיונות")
+
+    current = db.table("users").select("mobile").eq("id", user_id).execute()
+    current_mobile = _normalize_mobile(current.data[0].get("mobile") if current.data else "")
+    if current_mobile != otp["mobile"]:
+        _drop()
+        raise HTTPException(status_code=409, detail="מספר הנייד השתנה מאז שליחת הקוד — בקש קוד חדש")
+
+    _drop()
+    verified_at = now.isoformat()
+    # service_role — the DB trigger blocks anyone else from setting this flag.
+    sdb.table("users").update({
+        "two_factor_verified": True,
+        "two_factor_verified_at": verified_at,
+        "updated_at": verified_at,
+    }).eq("id", user_id).execute()
+
+    logger.info("2FA verified", extra={"action": "otp_verified", "user_id": user_id})
+    return OtpVerifyResponse(
+        message="האימות הדו-שלבי הושלם",
+        two_factor_verified=True,
+        verified_at=verified_at,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
