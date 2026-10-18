@@ -45,6 +45,14 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
       FRONTEND_URL: ${FRONTEND_URL}
+
+      # Auth emails (routers/auth_email.py): signup / forgot-password / magic-link via Resend
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      FROM_EMAIL: ${FROM_EMAIL:-noreply@mg.michal-solutions.com}
+      APP_NAME: ${APP_NAME:-ScenarioBot}
+      SITE_URL: ${SITE_URL:-https://grossman.bot}
+      ALLOWED_REDIRECT_ORIGINS: ${ALLOWED_REDIRECT_ORIGINS:-}
+
       SUPABASE_ANON_KEY: ${SUPABASE_KEY}
       WA_ACCESS_TOKEN: ${WA_ACCESS_TOKEN}
       WA_VERIFY_TOKEN: ${WA_VERIFY_TOKEN}
