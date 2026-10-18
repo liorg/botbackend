@@ -11,7 +11,7 @@ from supabase import Client, create_client
 
 from routers import (
     auth,  phones,  contacts,  scenarios,   schedules,   calls,messages,  proxy_media,  phones_contacts,  webhook_registrations, notifications, active_chats,contact_calls, wa_override_ab,phone_admin,contact_connect,
-    regex_ai,
+    regex_ai,auth_email
 )
 from config import APP_MODE
 from routers.template_manager import router as templates_router
@@ -21,7 +21,7 @@ from logging_config import get_logger, logging_middleware
 
 load_dotenv()
 
-version = "2.0.0.32"
+version = "2.0.0.34"
 logger = get_logger("main")
 
 BACKEND_URL = os.getenv("BACKEND_URL", "https://vid.michal-solutions.com/api").rstrip("/")
@@ -150,6 +150,7 @@ if APP_MODE == "internal":
     app.include_router(wa_override_ab.router, prefix="/api")   
     app.include_router(contact_connect.router, prefix="/api") 
     app.include_router(regex_ai.router, prefix="/api")
+    app.include_router(auth_email.router, prefix="/api")
     
 elif APP_MODE == "client":
     # בהתחלה רק endpoints שאתה באמת רוצה לחשוף
