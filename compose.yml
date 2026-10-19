@@ -68,6 +68,17 @@ services:
       WA_APP_SECRET: ${WA_APP_SECRET}
       WA_DEBUG_TOKEN: ${WA_DEBUG_TOKEN}
 
+      # 2FA / OTP (routers/two_factor.py). Sending = PhoneOrchestrator on botinbound, through otp_requests.
+      # OTP_PEPPER: openssl rand -hex 32. Changing it invalidates every open code.
+      OTP_PEPPER: ${OTP_PEPPER}
+      OTP_TTL_SEC: ${OTP_TTL_SEC:-420}
+      OTP_RESEND_SEC: ${OTP_RESEND_SEC:-60}
+      OTP_MAX_ATTEMPTS: ${OTP_MAX_ATTEMPTS:-5}
+      OTP_MAX_PER_HOUR: ${OTP_MAX_PER_HOUR:-5}
+
+      # "Add phone" gate (routers/phone_admin.py) — allowlist + 2FA
+      PHONE_ADMINS: ${PHONE_ADMINS:-g@miichal-solutions.com}
+
     volumes:
       - /opt/fastapi-app/gcs-key.json:/run/secrets/gcs-key.json:ro
 
