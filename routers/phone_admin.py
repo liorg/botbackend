@@ -1,22 +1,23 @@
 """
-routers/phone_admin.py — שער הרשאה ל"הוספת טלפון" (Beta gate)
+routers/phone_admin.py — gate for "add phone": allowlist (Beta) + 2FA.
 
-רישום ב-main.py:
+Registration in main.py:
     from routers import phone_admin
     app.include_router(phone_admin.router)
 
-חשוב: ה-disabled בצד React הוא רק UX. האכיפה האמיתית היא כאן —
-מוסיפים Depends(require_phone_admin) לכל route שיוצר/מקצה טלפון.
+Enforcement on the server — add Depends(require_phone_admin) to every route that creates/assigns a phone.
+React's disabled is UX only.
 """
 
 import os
 from fastapi import APIRouter, Depends, HTTPException
 
-from dependencies import get_current_user
+from dependencies import get_current_user, get_supabase
+from routers.two_factor import TWO_FA_REQUIRED, _uid, is_2fa_verified
 
 router = APIRouter(prefix="/phones", tags=["phones"])
 
-# רשימה מופרדת בפסיקים ב-.env:  PHONE_ADMINS=g@michal-solutions.com,other@x.com
+# .env:  PHONE_ADMINS=g@michal-solutions.com,other@x.com
 _DEFAULT_ADMINS = "g@miichal-solutions.com"
 
 PHONE_ADMINS = {
@@ -29,7 +30,6 @@ BETA_MESSAGE = "Beta version. To add a phone, contact contact@grossman.bot"
 
 
 def _email_of(user) -> str:
-    """get_current_user מחזיר לפעמים אובייקט ולפעמים dict — תומך בשניהם."""
     email = getattr(user, "email", None)
     if email is None and isinstance(user, dict):
         email = user.get("email")
@@ -42,29 +42,29 @@ def is_phone_admin(user) -> bool:
 
 def require_phone_admin(user=Depends(get_current_user)):
     """
-    Dependency לחסימה. שימוש בראוטר הטלפונים הקיים:
+    Order: allowlist first (403 Beta), then 2FA (403 TWO_FACTOR_REQUIRED).
 
         @router.post("")
-        async def create_phone(
-            payload: PhoneCreate,
-            db: Client = Depends(get_supabase),
-            user=Depends(require_phone_admin),   # ← במקום get_current_user
-        ):
-            ...
+        async def create_phone(payload: PhoneCreate, user=Depends(require_phone_admin)):
     """
     if not is_phone_admin(user):
         raise HTTPException(status_code=403, detail=BETA_MESSAGE)
+    if not is_2fa_verified(get_supabase(), _uid(user)):
+        raise HTTPException(status_code=403, detail=TWO_FA_REQUIRED)
     return user
 
 
-# ── חייב להיות מוצהר לפני /phones/{phone_id} בראוטר הטלפונים ──────────────
+# ── must be declared before /phones/{phone_id} in the phones router ────────────
 @router.get("/can_add")
 async def can_add_phone(user=Depends(get_current_user)):
-    """מקור אמת יחיד ל-UI — האם להציג את כפתור ההוספה כפעיל."""
-    allowed = is_phone_admin(user)
+    admin    = is_phone_admin(user)
+    verified = is_2fa_verified(get_supabase(), _uid(user))
     return {
-        "can_add": allowed,
-        "beta": True,
-        "message": None if allowed else BETA_MESSAGE,
-        "contact_email": "contact@grossman.bot",
+        "can_add":             admin and verified,
+        "is_admin":            admin,
+        "two_factor_verified": verified,
+        "reason":              None if admin and verified else ("beta" if not admin else "2fa"),
+        "beta":                True,
+        "message":             None if admin else BETA_MESSAGE,
+        "contact_email":       "contact@grossman.bot",
     }
