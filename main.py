@@ -11,7 +11,7 @@ from supabase import Client, create_client
 
 from routers import (
     auth,  phones,  contacts,  scenarios,   schedules,   calls,messages,  proxy_media,  phones_contacts,  webhook_registrations, notifications, active_chats,contact_calls, wa_override_ab,phone_admin,contact_connect,
-    regex_ai,auth_email
+    regex_ai,auth_email,two_factor
 )
 from config import APP_MODE
 from routers.template_manager import router as templates_router
@@ -21,7 +21,7 @@ from logging_config import get_logger, logging_middleware
 
 load_dotenv()
 
-version = "2.0.0.34"
+version = "2.0.0.35"
 logger = get_logger("main")
 
 BACKEND_URL = os.getenv("BACKEND_URL", "https://vid.michal-solutions.com/api").rstrip("/")
@@ -132,6 +132,7 @@ app.middleware("http")(logging_middleware)
 if APP_MODE == "internal":
     # ── Routers ───────────────────────────────────────────────────
     app.include_router(auth.router, prefix="/api")
+    app.include_router(two_factor.router, prefix="/api")    # /api/settings/2fa/* — service_role only
     app.include_router(phone_admin.router, prefix="/api")   # ← לפני phones
     app.include_router(phones.router, prefix="/api")
     app.include_router(contacts.router, prefix="/api")
