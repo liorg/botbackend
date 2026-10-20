@@ -35,6 +35,7 @@ _ERRORS = {
     "TOO_MANY":         (429, "Too many attempts. Request a new code"),
     "MOBILE_CHANGED":   (409, "The mobile number changed. Request a new code"),
     "INVALID":          (400, "Wrong code ({remaining} attempts left)"),
+    "MOBILE_IS_BOT_PHONE": (409, "This number is one of your bot phones. Use a different mobile for two-step verification"),
 }
 
 
@@ -44,9 +45,10 @@ def _raise(r: dict):
 
 
 def _uid(user) -> str:
+    # get_current_user returns a dict with "uid" (phones.py: user["uid"])
     uid = getattr(user, "id", None)
     if uid is None and isinstance(user, dict):
-        uid = user.get("id") or user.get("sub")
+        uid = user.get("uid") or user.get("id") or user.get("sub")
     if not uid:
         raise HTTPException(401, "Unauthorized")
     return str(uid)
