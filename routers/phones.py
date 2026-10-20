@@ -45,6 +45,18 @@ class ProvisionRequest(BaseModel):
     use_pairing_code: Optional[bool] = Field(None, description="Link with a pairing code instead of a QR code.")  # 22
 
 
+# ── 2FA ─────────────────────────────────────────────────────────────────────
+TWO_FA_PHONE_CONFLICT = (
+    "This number is your two-step verification mobile and cannot be added as a bot phone"
+)
+
+
+def _is_2fa_mobile(db: Client, user_id: str, number: str) -> bool:
+    """Normalization and comparison happen in the DB (rpc_is_2fa_mobile → norm_mobile),
+    the same rule as rpc_otp_request and the users trigger."""
+    return bool(db.rpc("rpc_is_2fa_mobile", {"p_user_id": user_id, "p_number": number}).execute().data)
+
+
 def _agent_headers() -> dict:
     return {"X-Agent-Token": AGENT_TOKEN, "Content-Type": "application/json"}
 
@@ -293,6 +305,14 @@ async def provision_phone(
     if not clean_number or len(clean_number) < 7:
         raise HTTPException(status_code=400, detail="Invalid phone number")
 
+    # ── the 2FA mobile (per user) cannot be a bot phone of the same user ──
+    # A bot phone that receives the OTP would let the automation read the code.
+    # The other direction (setting a bot phone as the 2FA mobile) is blocked by
+    # the users_mobile_reset_2fa trigger.
+    if _is_2fa_mobile(db, user["uid"], clean_number):
+        logger.warning(f"[PROVISION] refused — 2FA mobile | user={user['uid']} number={clean_number}")
+        raise HTTPException(status_code=409, detail=TWO_FA_PHONE_CONFLICT)
+
     # ── בדוק אם קיים לאותו user ──────────────────────────────────────
     existing_res = (
         db.table("phones")
@@ -304,6 +324,17 @@ async def provision_phone(
     )
     phone  = existing_res.data[0] if existing_res.data else None
     is_new = phone is None
+
+    # ── new phone: allowlist (Beta) + 2FA. Reconnect of an existing phone — no gate,
+    # same as the UI (App.jsx). Until now the gate lived only in React.
+    if is_new:
+        from routers.phone_admin import BETA_MESSAGE, is_phone_admin
+        from routers.two_factor import TWO_FA_REQUIRED, is_2fa_verified
+
+        if not is_phone_admin(user):
+            raise HTTPException(status_code=403, detail=BETA_MESSAGE)
+        if not is_2fa_verified(db, user["uid"]):
+            raise HTTPException(status_code=403, detail=TWO_FA_REQUIRED)
 
     logger.info(
         f"[PROVISION] user={user['uid']} number={clean_number} "
