@@ -37,6 +37,7 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from supabase import Client
 
 from dependencies import (
+    new_auth_flow_client,
     get_current_user,
     get_service_supabase,
     get_supabase,
@@ -428,13 +429,14 @@ def _otp_hash(user_id: str, code: str) -> str:
 )
 async def google_auth(request: GoogleTokenRequest):
     db = _public_db()
+    auth_db = new_auth_flow_client()
 
     credentials = {"provider": "google", "token": request.token}
     if request.nonce:
         credentials["nonce"] = request.nonce
 
     try:
-        result = db.auth.sign_in_with_id_token(credentials)
+        result = auth_db.auth.sign_in_with_id_token(credentials)
     except Exception as e:
         logger.warning(f"Google sign-in failed: {e}", extra={"action": "google_auth_failed"})
         raise HTTPException(status_code=401, detail="Invalid Google token")
@@ -471,9 +473,10 @@ async def google_auth(request: GoogleTokenRequest):
 )
 async def login(request: LoginRequest):
     db = _public_db()
+    auth_db = new_auth_flow_client()
 
     try:
-        result = db.auth.sign_in_with_password({
+        result = auth_db.auth.sign_in_with_password({
             "email": request.email,
             "password": request.password,
         })
@@ -515,9 +518,10 @@ async def login(request: LoginRequest):
 )
 async def signup(request: SignupRequest):
     db = _public_db()
+    auth_db = new_auth_flow_client()
 
     try:
-        result = db.auth.sign_up({
+        result = auth_db.auth.sign_up({
             "email": request.email,
             "password": request.password,
             "options": {
@@ -565,10 +569,10 @@ async def signup(request: SignupRequest):
     ),
 )
 async def forgot_password(request: ForgotPasswordRequest):
-    db = _public_db()
+    auth_db = new_auth_flow_client()
 
     try:
-        db.auth.reset_password_email(
+        auth_db.auth.reset_password_email(
             request.email,
             options={"redirect_to": f"{FRONTEND_URL}/reset-password"},
         )

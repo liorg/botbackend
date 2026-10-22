@@ -99,6 +99,23 @@ def get_service_supabase() -> Client:
     return _service_client()
 
 
+def new_auth_flow_client() -> Client:
+    """Fresh client per auth flow (sign-in, sign-up, OAuth, password reset).
+
+    Never cached and never used for table queries: signing in switches the
+    client's postgrest Authorization to the user's token, so a shared client
+    would run every later service-role query as that user.
+    """
+    return create_client(
+        _get_supabase_url(),
+        _get_service_key(),
+        options=ClientOptions(
+            persist_session=False,
+            auto_refresh_token=False,
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Token handling
 # ---------------------------------------------------------------------------
