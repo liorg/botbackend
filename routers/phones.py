@@ -197,7 +197,7 @@ PHONE_COLUMNS = (
 )
 
 @router.get("/", summary="List my phones", description="Returns the phones owned by the current user. Session credentials are never included.")
-async def list_phones(user=Depends(get_current_user), db: Client = Depends(get_supabase)):
+def list_phones(user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     result = (
         db.table("phones")
         .select(PHONE_COLUMNS)
@@ -521,7 +521,7 @@ class UpdatePhoneRequest(BaseModel):
 
 
 @router.patch("/{phone_id}", summary="Update phone", description="Updates label, color or lang on a phone owned by the current user. No other field can be changed.")
-async def update_phone(
+def update_phone(
     phone_id: str,
     body: UpdatePhoneRequest,
     user=Depends(get_current_user),
@@ -546,7 +546,7 @@ async def update_phone(
 
 
 @router.delete("/{phone_id}", summary="Delete phone", description="Deletes a phone owned by the current user.")
-async def delete_phone(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
+def delete_phone(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     result = (
         db.table("phones")
         .delete()
@@ -560,7 +560,7 @@ async def delete_phone(phone_id: str, user=Depends(get_current_user), db: Client
 
 
 @internal_route(router.patch("/{phone_id}/docker-status", summary="Update docker status", description="Internal. Stores docker_status and docker_url reported for the phone. Body: { status, url }."))
-async def update_docker_status(phone_id: str, body: dict, db: Client = Depends(get_supabase)):
+def update_docker_status(phone_id: str, body: dict, db: Client = Depends(get_supabase)):
     result = db.table("phones").update({
         "docker_status": body["status"],
         "docker_url":    body.get("url"),

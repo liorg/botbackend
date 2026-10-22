@@ -10,7 +10,9 @@ React's disabled is UX only.
 """
 
 import os
+
 from fastapi import APIRouter, Depends, HTTPException
+from supabase import Client
 
 from dependencies import get_current_user, get_supabase
 from routers.two_factor import TWO_FA_REQUIRED, _uid, is_2fa_verified
@@ -40,25 +42,31 @@ def is_phone_admin(user) -> bool:
     return _email_of(user) in PHONE_ADMINS
 
 
-def require_phone_admin(user=Depends(get_current_user)):
+def require_phone_admin(
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
     """
     Order: allowlist first (403 Beta), then 2FA (403 TWO_FACTOR_REQUIRED).
 
         @router.post("")
-        async def create_phone(payload: PhoneCreate, user=Depends(require_phone_admin)):
+        def create_phone(payload: PhoneCreate, user=Depends(require_phone_admin)):
     """
     if not is_phone_admin(user):
         raise HTTPException(status_code=403, detail=BETA_MESSAGE)
-    if not is_2fa_verified(get_supabase(), _uid(user)):
+    if not is_2fa_verified(db, _uid(user)):
         raise HTTPException(status_code=403, detail=TWO_FA_REQUIRED)
     return user
 
 
 # ── must be declared before /phones/{phone_id} in the phones router ────────────
 @router.get("/can_add")
-async def can_add_phone(user=Depends(get_current_user)):
+def can_add_phone(
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
     admin    = is_phone_admin(user)
-    verified = is_2fa_verified(get_supabase(), _uid(user))
+    verified = is_2fa_verified(db, _uid(user))
     return {
         "can_add":             admin and verified,
         "is_admin":            admin,

@@ -15,6 +15,8 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
+from supabase import Client
 
 from dependencies import get_current_user, get_supabase
 from services import otp
@@ -54,27 +56,38 @@ def _uid(user) -> str:
     return str(uid)
 
 
-def _rpc(db, name: str, params: dict) -> dict:
+def _rpc(db: Client, name: str, params: dict) -> dict:
     data = db.rpc(name, params).execute().data
     return (data[0] if data else {}) if isinstance(data, list) else (data or {})
 
 
+def _send_status(db: Client, request_id) -> str | None:
+    res = db.table("otp_requests").select("send_status").eq("id", request_id).maybe_single().execute()
+    return ((res and res.data) or {}).get("send_status")
+
+
 # ── gate ──────────────────────────────────────────────────────────────────
-def is_2fa_verified(db, user_id: str) -> bool:
+def is_2fa_verified(db: Client, user_id: str) -> bool:
     row = db.table("users").select("two_factor_verified").eq("id", user_id).maybe_single().execute()
     return bool(((row and row.data) or {}).get("two_factor_verified"))
 
 
-def require_2fa(user=Depends(get_current_user)):
-    if not is_2fa_verified(get_supabase(), _uid(user)):
+def require_2fa(
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    if not is_2fa_verified(db, _uid(user)):
         raise HTTPException(403, TWO_FA_REQUIRED)
     return user
 
 
 # ── endpoints ─────────────────────────────────────────────────────────────
 @router.get("/status")
-async def status(user=Depends(get_current_user)):
-    row = (get_supabase().table("users").select("mobile, two_factor_verified, two_factor_verified_at")
+def status(
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    row = (db.table("users").select("mobile, two_factor_verified, two_factor_verified_at")
            .eq("id", _uid(user)).maybe_single().execute())
     u = (row and row.data) or {}
     return {
@@ -87,11 +100,17 @@ async def status(user=Depends(get_current_user)):
 
 
 @router.post("/request")
-async def request_otp(response: Response, user=Depends(get_current_user)):
-    db, uid = get_supabase(), _uid(user)
+async def request_otp(
+    response: Response,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    # async because of the wait loop (asyncio.sleep); every db call goes
+    # through the threadpool so the event loop is never blocked.
+    uid = _uid(user)
     code = otp.new_code()
 
-    r = _rpc(db, "rpc_otp_request", {
+    r = await run_in_threadpool(_rpc, db, "rpc_otp_request", {
         "p_user_id": uid, "p_code": code, "p_code_hash": otp.hash_code(uid, code),
         "p_ttl_sec": otp.TTL_SEC, "p_resend_sec": otp.RESEND_SEC,
         "p_max_per_hour": otp.MAX_PER_HOUR, "p_max_attempts": otp.MAX_ATTEMPTS,
@@ -102,8 +121,7 @@ async def request_otp(response: Response, user=Depends(get_current_user)):
     # PhoneOrchestrator takes it within ~2s — waiting for the result
     st, deadline = None, time.monotonic() + SEND_WAIT_SEC
     while time.monotonic() < deadline:
-        res = db.table("otp_requests").select("send_status").eq("id", r["id"]).maybe_single().execute()
-        st = ((res and res.data) or {}).get("send_status")
+        st = await run_in_threadpool(_send_status, db, r["id"])
         if st in ("sent", "failed"):
             break
         await asyncio.sleep(0.5)
@@ -124,8 +142,12 @@ class VerifyReq(BaseModel):
 
 
 @router.post("/verify")
-async def verify_otp(req: VerifyReq, user=Depends(get_current_user)):
-    db, uid = get_supabase(), _uid(user)
+def verify_otp(
+    req: VerifyReq,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+):
+    uid = _uid(user)
     r = _rpc(db, "rpc_otp_verify", {"p_user_id": uid, "p_code_hash": otp.hash_code(uid, req.code)})
     if not r.get("ok"):
         _raise(r)

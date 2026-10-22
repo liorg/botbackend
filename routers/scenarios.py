@@ -210,7 +210,7 @@ async def _run_publish_checks(row: dict, db: Client, phone_id: str) -> list[dict
 # ── List scenarios ─────────────────────────────────────────────────────────
 # ── List scenarios (paginated) ─────────────────────────────────────────────
 @router.get("/", summary="List scenarios", description="Returns the phone's scenarios, newest first. Page size comes from bot_config 'scenarios.paging'.")
-async def list_scenarios(
+def list_scenarios(
     phone_id: str,
     page: int = Query(1, description="Page number, starting at 1."),
     db: Client = Depends(get_supabase),
@@ -240,7 +240,7 @@ async def list_scenarios(
 
 # ── List by event_type ─────────────────────────────────────────────────────
 @router.get("/by-type/{event_type}", summary="List active scenarios by type", description="Returns the phone's active scenarios of the given event_type (trigger or scheduler), newest first.")
-async def list_scenarios_by_type(
+def list_scenarios_by_type(
     phone_id: str,
     event_type: Literal["trigger", "scheduler"],
     db: Client = Depends(get_supabase)
@@ -259,7 +259,7 @@ async def list_scenarios_by_type(
 
 # ── Get one ────────────────────────────────────────────────────────────────
 @router.get("/{scenario_id}", summary="Get scenario", description="Returns one scenario of the phone with its config fields expanded.")
-async def get_scenario(
+def get_scenario(
     phone_id: str, scenario_id: str, db: Client = Depends(get_supabase)
 ):
     result = (
@@ -277,7 +277,7 @@ async def get_scenario(
 
 # ── Create ─────────────────────────────────────────────────────────────────
 @router.post("/", summary="Create scenario", description="Creates a scenario (draft by default). Designer fields are stored inside config.")
-async def create_scenario(
+def create_scenario(
     phone_id: str, body: ScenarioCreate, db: Client = Depends(get_supabase)
 ):
     config = _merge_config({}, body)
@@ -303,7 +303,7 @@ async def create_scenario(
 
 # ── Update ─────────────────────────────────────────────────────────────────
 @router.put("/{scenario_id}", summary="Update scenario", description="Updates a scenario. Designer fields are merged into the existing config; only the fields that are sent change.")
-async def update_scenario(
+def update_scenario(
     phone_id: str, scenario_id: str, body: ScenarioUpdate,
     db: Client = Depends(get_supabase)
 ):
@@ -380,7 +380,7 @@ async def publish_scenario(
 
 # ── Delete ─────────────────────────────────────────────────────────────────
 @router.delete("/{scenario_id}", summary="Delete scenario", description="Deletes the scenario.")
-async def delete_scenario(
+def delete_scenario(
     phone_id: str, scenario_id: str, db: Client = Depends(get_supabase)
 ):
     db.table("scenarios").delete().eq("id", scenario_id).eq("phone_id", phone_id).execute()

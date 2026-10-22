@@ -108,7 +108,7 @@ async def _get_user_id_for_phone(db: Client, phone_id: str) -> Optional[str]:
 # ══════════════════════════════════════════════════════════════════════
 
 @router.get("/contacts/check-phone", response_model=CheckPhoneResponse, summary="Check number before PING", description="Looks up a number on the phone. Returns 'new' when there is no contact, 'blocked' when the contact already has a real LID, or 'override' together with any pending PING step.")
-async def check_phone(
+def check_phone(
     phone_id: str = Query(..., description="Phone to search in."),
     number: str = Query(..., description="Number to check. Non-digits are removed."),
     user=Depends(get_current_user),
@@ -188,7 +188,7 @@ async def check_phone(
 # ══════════════════════════════════════════════════════════════════════
 
 @router.get("/calls/{call_id}/messages", summary="List call messages", description="Returns every message linked to the call, oldest first.")
-async def get_call_messages(
+def get_call_messages(
     call_id: str,
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
@@ -207,7 +207,7 @@ async def get_call_messages(
 
 
 @router.get("/contacts/{contact_id}/messages", summary="List contact messages (raw)", description="Returns every message of the contact, oldest first, as stored rows.")
-async def get_contact_messages(
+def get_contact_messages(
     contact_id: str,
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
@@ -227,7 +227,7 @@ async def get_contact_messages(
 
 
 @router.get("/contacts", summary="List contacts", description="Returns the phone's contacts, most recently updated first.")
-async def list_contacts(
+def list_contacts(
     phone_id: str = Query(..., description="Phone whose contacts to list."),
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
@@ -282,7 +282,7 @@ async def create_contact(
 
 
 @router.get("/contacts/{contact_id}", summary="Get contact", description="Returns a fresh copy of one contact from the database.")
-async def get_contact(
+def get_contact(
     contact_id: str,
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
@@ -311,7 +311,7 @@ async def get_contact(
 
 
 @router.patch("/contacts/{contact_id}", summary="Update contact", description="Updates name, email, tag, lid or lang. Only the fields that are sent change.")
-async def update_contact(
+def update_contact(
     contact_id: str,
     body: UpdateContactRequest,
     user=Depends(get_current_user),
@@ -340,7 +340,7 @@ async def update_contact(
 
 
 @router.delete("/contacts/{contact_id}", summary="Delete contact", description="Deletes the contact together with its messages and PING records, and unlinks drafts that pointed to it. Returns the number of deleted messages.")
-async def delete_contact(
+def delete_contact(
     contact_id: str,
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
@@ -597,7 +597,7 @@ async def create_contact_from_ping(
 # ══════════════════════════════════════════════════════════════════════
 
 @router.get("/contacts/outgoing-with-replies/{phone_id}", summary="List PING replies (step 2)", description="Returns draft contacts with a valid LID that have messages from the last 24 hours, with those messages, so the user can pick the reply that answers the PING.")
-async def get_outgoing_with_replies(
+def get_outgoing_with_replies(
     phone_id: str,
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
@@ -744,7 +744,7 @@ async def get_outgoing_with_replies(
 # ══════════════════════════════════════════════════════════════════════
 
 @router.post("/contacts/select-response", summary="Select PING reply (step 3)", description="Takes the LID from the chosen message, sets it on the target contact and tags it 'active'. Clears the LID from the draft, links unlinked drafts with the same LID or number to the contact and completes the pending PING.")
-async def select_response(
+def select_response(
     body: SelectResponseRequest,
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
@@ -892,7 +892,7 @@ class LinkDraftRequest(BaseModel):
 
 
 @router.post("/contacts/link-draft-to-parent", summary="Link draft to PING contact", description="Called by the agent webhook. Links a draft contact to the contact of the latest pending PING on the phone.")
-async def link_draft_to_parent(
+def link_draft_to_parent(
     body: LinkDraftRequest,
     db: Client = Depends(get_supabase),
 ):

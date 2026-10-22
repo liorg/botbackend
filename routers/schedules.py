@@ -170,7 +170,7 @@ def _resolve_scenario(
 
 @router.get("", summary="List schedules", description="Legacy flat list with scenario name, last call status and running flag. The grid uses /schedules/paged.")
 @router.get("/", summary="List schedules", description="Legacy flat list with scenario name, last call status and running flag. The grid uses /schedules/paged.")
-async def list_schedules(
+def list_schedules(
     phone_id: Optional[str] = Query(None, description="Filter by phone."),
     status: Optional[str] = Query(None, description="Filter by status."),
     db: Client = Depends(get_supabase),
@@ -193,7 +193,7 @@ async def list_schedules(
 
 # ⚠️ חייב להופיע לפני GET /{schedule_id}, אחרת "paged" ייתפס כ-schedule_id
 @router.get("/paged", summary="List schedules (paged)", description="Returns { schedules, total, page, page_size }. Page size comes from bot_config 'schedules_page_size'.")
-async def list_schedules_paged(
+def list_schedules_paged(
     phone_id: Optional[str] = Query(None, description="Filter by phone."),
     status: Optional[str] = Query(None, description="Filter by status."),
     page: int = Query(1, ge=1, description="Page number, starting at 1."),
@@ -226,7 +226,7 @@ async def list_schedules_paged(
 # ── Calls (לוג אירועים) — מדורג ────────────────────────────────────────────
 
 @router.get("/{schedule_id}/calls", summary="List schedule calls", description="Returns the calls fired by the schedule, paged. Page size comes from bot_config 'schedule_log_page_size'.")
-async def schedule_calls(
+def schedule_calls(
     schedule_id: str,
     page: int = Query(1, ge=1, description="Page number, starting at 1."),
     db: Client = Depends(get_supabase),
@@ -254,7 +254,7 @@ async def schedule_calls(
 # חייב להיות מוגדר לפני GET /{schedule_id} — אחרת "calls" נתפס כ-id.
 
 @router.get("/calls/{call_id}/events", summary="List call events", description="Returns the Spine events of a call, for drill-down.")
-async def call_events(
+def call_events(
     call_id: str,
     db: Client = Depends(get_supabase),
 ):
@@ -269,7 +269,7 @@ async def call_events(
 # ── Get one ────────────────────────────────────────────────────────────────
 
 @router.get("/{schedule_id}", summary="Get schedule", description="Returns one schedule in the same shape as the list.")
-async def get_schedule(
+def get_schedule(
     schedule_id: str,
     db: Client = Depends(get_supabase),
 ):
@@ -289,7 +289,7 @@ async def get_schedule(
 
 @router.post("", status_code=201, summary="Create schedule", description="Creates a schedule and computes next_run. contact_id is taken from the scenario, which must belong to the phone.")
 @router.post("/", status_code=201, summary="Create schedule", description="Creates a schedule and computes next_run. contact_id is taken from the scenario, which must belong to the phone.")
-async def create_schedule(
+def create_schedule(
     body: ScheduleCreate,
     db: Client = Depends(get_supabase),
 ):
@@ -345,7 +345,7 @@ async def create_schedule(
 # ── Update ─────────────────────────────────────────────────────────────────
 
 @router.put("/{schedule_id}", summary="Update schedule", description="Updates a schedule. next_run is recomputed only when the timing really changes; contact_id follows the scenario.")
-async def update_schedule(
+def update_schedule(
     schedule_id: str,
     body: ScheduleUpdate,
     db: Client = Depends(get_supabase),
@@ -448,7 +448,7 @@ async def update_schedule(
 # ── Delete ─────────────────────────────────────────────────────────────────
 
 @router.delete("/{schedule_id}", summary="Delete schedule", description="Deletes the schedule.")
-async def delete_schedule(
+def delete_schedule(
     schedule_id: str,
     db: Client = Depends(get_supabase),
 ):
@@ -468,7 +468,7 @@ async def delete_schedule(
 # ── Run now ────────────────────────────────────────────────────────────────
 
 @router.post("/{schedule_id}/run", summary="Run schedule now", description="Queues the schedule by setting next_run=now and status=active; the Scheduler fires it on its next tick. Returns 409 while the schedule is firing.")
-async def run_schedule_now(
+def run_schedule_now(
     schedule_id: str,
     db: Client = Depends(get_supabase),
 ):

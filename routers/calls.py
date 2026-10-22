@@ -69,7 +69,7 @@ def _get_running_recording_call(
 
 
 @router.post("/start")
-async def start_call(
+def start_call(
     body: StartCallRequest,
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
@@ -144,7 +144,7 @@ async def start_call(
 # חשוב: חייב להיות לפני @router.get("/{call_id}") כדי ש-"active"
 # לא ייתפס כ-call_id.
 @router.get("/active/{phone_id}/{contact_id}")
-async def get_active_call(
+def get_active_call(
     phone_id: str,
     contact_id: str,
     user=Depends(get_current_user),
@@ -155,7 +155,7 @@ async def get_active_call(
 
 
 @router.get("/{call_id}/messages")
-async def poll_call_messages(
+def poll_call_messages(
     call_id: str,
     since: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
@@ -226,7 +226,7 @@ async def poll_call_messages(
 
 
 @router.post("/end")
-async def end_call(
+def end_call(
     body: EndCallRequest,
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
@@ -293,7 +293,7 @@ async def end_call(
 
 
 @router.get("/{call_id}")
-async def get_call(
+def get_call(
     call_id: str,
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),

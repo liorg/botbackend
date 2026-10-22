@@ -125,7 +125,7 @@ def format_message(msg, phone_number: str = "", phone_id: str = ""):
 # ── Endpoints ─────────────────────────────────────────────────────────
 
 @router.get("/contact/{contact_id}", summary="List contact messages", description="Returns up to limit messages of the contact, oldest first, formatted for the chat view.")
-async def get_contact_messages(
+def get_contact_messages(
     contact_id: str,
     limit: int = Query(200, le=500, description="Maximum number of messages to return."),
     phone_number: str = Query("", description="Bot phone number, used to tell bot messages from user messages when direction is missing."),
@@ -143,7 +143,7 @@ async def get_contact_messages(
 
 
 @router.get("/phone/{phone_id}/contact/{contact_id}", summary="List chat messages", description="Returns up to limit formatted messages between the phone and the contact, oldest first. Falls back to the contact's messages that have no phone_id.")
-async def get_messages_by_phone_and_contact(
+def get_messages_by_phone_and_contact(
     phone_id: str,
     contact_id: str,
     limit: int = Query(200, le=500, description="Maximum number of messages to return."),
@@ -179,7 +179,7 @@ async def get_messages_by_phone_and_contact(
 
 
 @router.get("/phone/{phone_id}", summary="List phone messages", description="Returns up to limit formatted messages of the phone, newest first.")
-async def get_all_phone_messages(
+def get_all_phone_messages(
     phone_id: str,
     limit: int = Query(500, le=1000, description="Maximum number of messages to return."),
     db: Client = Depends(get_supabase),
@@ -249,7 +249,7 @@ async def proxy_media(
         raise HTTPException(503, f"Agent unavailable: {e}")
 
 @router.get("/phone/{phone_id}/last", summary="Last message per contact", description="Returns the last message of every contact of the phone in one call, as an object keyed by contact_id.")
-async def get_last_messages_for_phone(
+def get_last_messages_for_phone(
     phone_id: str,
     db: Client = Depends(get_supabase),
 ):
@@ -292,7 +292,7 @@ async def get_last_messages_for_phone(
 # ══════════════════════════════════════════════════════════════════════
 
 @router.get("/phone/{phone_id}/contact/{contact_id}/page", summary="Get chat messages page", description="Keyset paging for a chat. No cursor returns the newest page; before_sent_at + before_id return an older page; after_sent_at returns only newer messages for polling. Returns { messages, has_more, next_cursor }.")
-async def get_messages_page(
+def get_messages_page(
     phone_id: str,
     contact_id: str,
     limit: int = Query(30, le=100, description="Page size."),

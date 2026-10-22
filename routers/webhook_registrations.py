@@ -1,4 +1,5 @@
 import logging
+import threading
 from typing import Optional
 
 from fastapi import APIRouter, Depends
@@ -17,7 +18,10 @@ logger = logging.getLogger(__name__)
 
 # זמני בזיכרון.
 # מתאים רק ל-instance יחיד של FastAPI.
+# def endpoints run in the threadpool: every access goes through the lock,
+# otherwise an append can land in a list poll has already popped.
 _pending: dict[str, list[dict]] = {}
+_pending_lock = threading.Lock()
 
 
 def _key(phone_id: str, contact_id: str) -> str:
@@ -70,7 +74,7 @@ class MessagePayload(BaseModel):
     )
 
 
-async def _resolve_recording_call_id(
+def _resolve_recording_call_id(
     db: Client,
     phone_id: str,
     contact_id: str,
@@ -134,7 +138,7 @@ async def _resolve_recording_call_id(
 
 
 @router.post("/callback")
-async def receive_callback(
+def receive_callback(
     body: MessagePayload,
     db: Client = Depends(get_supabase),
 ):
@@ -169,7 +173,7 @@ async def receive_callback(
             "error": "phoneId and contactId are required",
         }
 
-    call_id = await _resolve_recording_call_id(
+    call_id = _resolve_recording_call_id(
         db,
         phone_id,
         contact_id,
@@ -217,24 +221,20 @@ async def receive_callback(
                 call_id,
             )
 
-    pending_key = _key(
-        phone_id,
-        contact_id,
-    )
-
-    _pending.setdefault(
-        pending_key,
-        [],
-    ).append(
-        {
-            "message_id": message_id,
-            "whatsapp_message_id": whatsapp_message_id,
-            "phone_id": phone_id,
-            "contact_id": contact_id,
-            "direction": body.direction,
-            "call_id": call_id,
-        }
-    )
+    with _pending_lock:
+        _pending.setdefault(
+            _key(phone_id, contact_id),
+            [],
+        ).append(
+            {
+                "message_id": message_id,
+                "whatsapp_message_id": whatsapp_message_id,
+                "phone_id": phone_id,
+                "contact_id": contact_id,
+                "direction": body.direction,
+                "call_id": call_id,
+            }
+        )
 
     return {
         "ok": True,
@@ -245,21 +245,17 @@ async def receive_callback(
 
 
 @router.get("/poll/{phone_id}/{contact_id}")
-async def poll_messages(
+def poll_messages(
     phone_id: str,
     contact_id: str,
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
-    pending_key = _key(
-        phone_id,
-        contact_id,
-    )
-
-    pending_messages = _pending.pop(
-        pending_key,
-        [],
-    )
+    with _pending_lock:
+        pending_messages = _pending.pop(
+            _key(phone_id, contact_id),
+            [],
+        )
 
     if not pending_messages:
         return {

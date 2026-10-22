@@ -28,7 +28,7 @@ _CALL_SELECT = (
 # ── רשימת שיחות של איש קשר (עם דפדוף — הכל בתוך ה-RPC) ────────────────────
 @router.get("")   # בלי סלאש בסוף
 @router.get("/")  # עם סלאש — שניהם עובדים, בלי תלות ב-redirect של ה-proxy
-async def list_contact_calls(
+def list_contact_calls(
     contact_id: str,
     page: int = 1,
     status: Optional[str] = None,
@@ -51,7 +51,7 @@ async def list_contact_calls(
 
 # ── Flow של שיחה — RPC אחד ─────────────────────────────────────────────────
 @router.get("/{call_id}/flow")
-async def get_call_flow(contact_id: str, call_id: str, db: Client = Depends(get_supabase)):
+def get_call_flow(contact_id: str, call_id: str, db: Client = Depends(get_supabase)):
     result = db.rpc(
         "get_call_flow",
         {"p_contact_id": contact_id, "p_call_id": call_id},

@@ -644,7 +644,7 @@ async def get_settings(
         "The avatar is set through POST /auth/avatar; package_type cannot be changed."
     ),
 )
-async def update_settings(
+def update_settings(
     body: UpdateSettingsRequest,
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
@@ -694,7 +694,7 @@ async def update_settings(
         f"and {OTP_MAX_ATTEMPTS} wrong attempts invalidate it."
     ),
 )
-async def request_2fa(
+def request_2fa(
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
@@ -768,7 +768,7 @@ async def request_2fa(
         "the attempts ran out, or the mobile changed after the code was sent."
     ),
 )
-async def verify_2fa(
+def verify_2fa(
     body: OtpVerifyRequest,
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),

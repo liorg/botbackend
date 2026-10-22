@@ -57,7 +57,7 @@ def _validate_phone_number(value: str) -> str:
 # ── List ───────────────────────────────────────────────────────────────────
 
 @router.get("/")
-async def list_executions(db: Client = Depends(get_supabase)):
+def list_executions(db: Client = Depends(get_supabase)):
     res = db.rpc("exec_list", {}).execute()
     return res.data if res.data is not None else []
 
@@ -65,7 +65,7 @@ async def list_executions(db: Client = Depends(get_supabase)):
 # ── Seek contact (Wizard שלב 1→2) ─────────────────────────────────────────
 
 @router.get("/seek/{phone_number}")
-async def seek_contact(phone_number: str, db: Client = Depends(get_supabase)):
+def seek_contact(phone_number: str, db: Client = Depends(get_supabase)):
     pn = _validate_phone_number(phone_number)
     res = db.rpc("exec_seek_contact", {"p_phone_number": pn}).execute()
     data = res.data or {}
@@ -77,7 +77,7 @@ async def seek_contact(phone_number: str, db: Client = Depends(get_supabase)):
 # ── Scenarios for selected phones (Wizard שלב 3) ──────────────────────────
 
 @router.post("/scenarios")
-async def scenarios_for_phones(body: ScenariosQuery,
+def scenarios_for_phones(body: ScenariosQuery,
                                db: Client = Depends(get_supabase)):
     if not body.phone_ids:
         raise HTTPException(400, "phone_ids is required")
@@ -88,7 +88,7 @@ async def scenarios_for_phones(body: ScenariosQuery,
 # ── Create (Wizard שלב 4 — סיום) ──────────────────────────────────────────
 
 @router.post("/")
-async def create_execution(body: ExecutionCreate,
+def create_execution(body: ExecutionCreate,
                            db: Client = Depends(get_supabase)):
     pn = _validate_phone_number(body.contact_phone_number)
 
@@ -159,7 +159,7 @@ async def run_execution(execution_id: str,
 # ── Stop ───────────────────────────────────────────────────────────────────
 
 @router.post("/{execution_id}/stop")
-async def stop_execution(execution_id: str,
+def stop_execution(execution_id: str,
                          db: Client = Depends(get_supabase)):
     links_res = db.rpc("exec_links", {"p_execution_id": execution_id}).execute()
     for link in (links_res.data or []):
@@ -175,7 +175,7 @@ async def stop_execution(execution_id: str,
 # ── Delete (מוחק גם schedules + תרחישים משוכפלים) ────────────────────────
 
 @router.delete("/{execution_id}")
-async def delete_execution(execution_id: str,
+def delete_execution(execution_id: str,
                            db: Client = Depends(get_supabase)):
     links_res = db.rpc("exec_links", {"p_execution_id": execution_id}).execute()
     links = links_res.data or []

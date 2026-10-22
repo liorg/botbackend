@@ -1,8 +1,9 @@
+from dataclasses import dataclass
 from functools import lru_cache
 import os
 
 import jwt
-from fastapi import Header, HTTPException
+from fastapi import Depends, Header, HTTPException
 from supabase import Client, create_client
 from supabase.client import ClientOptions
 
@@ -218,16 +219,35 @@ def _verify_user_token(token: str) -> dict:
 # ---------------------------------------------------------------------------
 # FastAPI dependencies
 #
+# get_auth verifies the token once per request. FastAPI caches a dependency
+# per request, so an endpoint that takes both get_current_user and
+# get_supabase shares one verification (one network call at most on
+# ES256/RS256).
+#
 # Both modes authenticate the browser's Supabase JWT. They differ only in
 # which Supabase credentials the resulting queries run under:
 #   internal -> service role, RLS bypassed
 #   client   -> the user's own token, RLS enforced
 # ---------------------------------------------------------------------------
 
-def get_current_user(
+@dataclass(frozen=True)
+class AuthContext:
+    token: str
+    user: dict
+
+
+def get_auth(
     authorization: str | None = Header(None),
+) -> AuthContext:
+    token = _extract_bearer_token(authorization)
+    return AuthContext(token=token, user=_verify_user_token(token))
+
+
+def get_current_user(
+    auth: AuthContext = Depends(get_auth),
 ) -> dict:
-    return _verify_user_token(_extract_bearer_token(authorization))
+    return auth.user
+
 
 @lru_cache(maxsize=256)
 def _user_client(token: str) -> Client:
@@ -253,19 +273,15 @@ def _user_client(token: str) -> Client:
 
 
 def get_supabase(
-    authorization: str | None = Header(None),
+    auth: AuthContext = Depends(get_auth),
 ) -> Client:
-    token = _extract_bearer_token(authorization)
-
-    # Authenticate in both modes: the service client must never be handed
-    # out to an unauthenticated caller.
-    _verify_user_token(token)
-
+    # Authenticated by get_auth: the service client is never handed out
+    # to an unauthenticated caller.
     if APP_MODE == "internal":
         return _service_client()
 
     try:
-        return _user_client(token)
+        return _user_client(auth.token)
     except RuntimeError as e:
         print(f"[AUTH] {e}")
         raise HTTPException(

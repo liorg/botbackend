@@ -506,7 +506,7 @@ async def test_send(
 
 
 @router.post("/{template_id}/approve-publish", summary="Approve and publish template", description="Publishes a template that the provider has already approved.")
-async def approve_and_publish(
+def approve_and_publish(
     phone_id: str,
     template_id: str,
     db: Client = Depends(get_supabase),
@@ -556,7 +556,7 @@ async def approve_and_publish(
     return _expand(result.data[0])
 
 @router.get("/", summary="List templates", description="Returns templates newest first. phone_id='all' with phone_ids=a,b,c lists across phones. Optional status, lang and name filters. Page size comes from bot_config 'templates.paging'. Returns counts per status.")
-async def list_templates(
+def list_templates(
     phone_id: str,
     page: int = Query(1, description="Page number, starting at 1."),
     status: Optional[str] = Query(None, description="Filter by status. Empty or 'all' = all."),
@@ -618,7 +618,7 @@ async def list_templates(
         "counts":      counts,
     }
 @router.get("/published", summary="List published templates", description="Returns approved and published templates ordered by name, for the scenario InputEditor.")
-async def list_published(phone_id: str, db: Client = Depends(get_supabase)):
+def list_published(phone_id: str, db: Client = Depends(get_supabase)):
     """לשימוש ה-InputEditor — רק תבניות מאושרות ומפורסמות."""
     result = (
         db.table("phone_templates")
@@ -633,7 +633,7 @@ async def list_published(phone_id: str, db: Client = Depends(get_supabase)):
 
 
 @router.get("/{template_id}", summary="Get template", description="Returns one template with its parameter map and preview.")
-async def get_template(
+def get_template(
     phone_id: str, template_id: str, db: Client = Depends(get_supabase)
 ):
     result = (
@@ -650,7 +650,7 @@ async def get_template(
 
 
 @router.post("/", summary="Create template", description="Creates a template as a local draft only. Nothing is sent to the Manager until the template is published.")
-async def create_template(
+def create_template(
     phone_id: str,
     body: TemplateCreate,
     user=Depends(get_current_user),
@@ -690,7 +690,7 @@ async def create_template(
 
 
 @router.put("/{template_id}", summary="Update template", description="Updates an unpublished template. Changing content moves an approved or rejected template back to pending. Returns 409 when the template is published.")
-async def update_template(
+def update_template(
     phone_id: str,
     template_id: str,
     body: TemplateUpdate,
@@ -747,7 +747,7 @@ async def update_template(
 
 
 @router.post("/{template_id}/validate", summary="Validate template", description="Checks the template and returns { ok, issues } without changing it.")
-async def validate_template(
+def validate_template(
     phone_id: str, template_id: str, db: Client = Depends(get_supabase)
 ):
     result = (
@@ -771,7 +771,7 @@ async def validate_template(
 
 
 @router.patch("/{template_id}/status", summary="Set template status", description="Sets pending, approved, rejected or pause. Any status other than approved also unpublishes the template.")
-async def set_status(
+def set_status(
     phone_id: str,
     template_id: str,
     body: StatusUpdate,
@@ -863,7 +863,7 @@ async def publish_template(
 
 
 @router.post("/{template_id}/unpublish", summary="Unpublish template", description="Marks the template as not published.")
-async def unpublish_template(
+def unpublish_template(
     phone_id: str, template_id: str, db: Client = Depends(get_supabase)
 ):
     result = (

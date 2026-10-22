@@ -131,7 +131,7 @@ def _shape(m: dict) -> dict:
     ),
     responses={404: {"description": "Contact not found"}},
 )
-async def get_conversation(
+def get_conversation(
     contact_id: str,
     limit: int = Query(50, ge=1, le=200),
     before: Optional[str] = Query(None, description="sent_at — return messages older than this"),
@@ -184,7 +184,7 @@ async def get_conversation(
         409: {"description": "Tag cannot be connected, or `lid_conflict` - target is linked to a different LID"},
     },
 )
-async def connect_contact(
+def connect_contact(
     contact_id: str,
     body: ConnectContactRequest,
     user=Depends(get_current_user),
@@ -337,7 +337,7 @@ async def connect_contact(
     ),
     responses={404: {"description": "Contact not found"}},
 )
-async def ignore_contact(
+def ignore_contact(
     contact_id: str,
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
@@ -361,7 +361,7 @@ async def ignore_contact(
     description="Returns a contact with `tag=ignore` to `tag=new`, so it appears again in the unidentified list on the calls screen.",
     responses={404: {"description": "No ignored contact found with this ID"}},
 )
-async def unignore_contact(
+def unignore_contact(
     contact_id: str,
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
