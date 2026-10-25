@@ -241,7 +241,11 @@ def add_trusted_domain(sb, user_id: str, url: str) -> dict:
                                          "items": [{"url": url, "error": _error_text(url, e)}]})
     if v["domain"] not in {r["domain"] for r in current} and len(current) >= MAX_PER_USER:
         raise HTTPException(422, detail={"error": "trusted_domain_limit", "max": MAX_PER_USER})
-    return _upsert(sb, user_id, v)
+    try:
+        return _upsert(sb, user_id, v)
+    except Exception as e:  # noqa: BLE001
+        log.exception("trusted domain db write failed | user=%s", user_id)
+        raise HTTPException(500, detail={"error": "trusted_domain_db", "message": str(e)[:300]})
 
 
 def sync_trusted_domains(sb, user_id: str, urls) -> list:
@@ -270,11 +274,17 @@ def sync_trusted_domains(sb, user_id: str, urls) -> list:
     if errors:
         raise HTTPException(422, detail={"error": "trusted_domain_invalid", "items": errors})
 
-    rows = [_upsert(sb, user_id, v) for v in verified.values()]
-    sb.rpc("rpc_trusted_domain_revoke_missing", {
-        "p_user_id": user_id,
-        "p_keep": sorted(verified.keys()),
-    }).execute()
+    # שגיאת DB לא-מטופלת → 500 בלי CORS header, והדפדפן מראה רק "Failed to fetch".
+    # HTTPException עובר דרך CORSMiddleware ומגיע ל-UI עם הסיבה.
+    try:
+        rows = [_upsert(sb, user_id, v) for v in verified.values()]
+        sb.rpc("rpc_trusted_domain_revoke_missing", {
+            "p_user_id": user_id,
+            "p_keep": sorted(verified.keys()),
+        }).execute()
+    except Exception as e:  # noqa: BLE001
+        log.exception("trusted domains db write failed | user=%s", user_id)
+        raise HTTPException(500, detail={"error": "trusted_domain_db", "message": str(e)[:300]})
 
     log.info("trusted domains synced | user=%s domains=%s", user_id, ",".join(sorted(verified)))
     return rows
