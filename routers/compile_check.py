@@ -15,7 +15,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional, Any, Literal
 
-from dependencies import get_current_user
+from dependencies import get_current_user, get_service_supabase
+from services.trusted_domains import user_trusted_set, base_domains
 from logging_config import get_logger
 
 logger = get_logger("compile_check")
@@ -90,6 +91,15 @@ async def _post_worker(path: str, payload: dict) -> dict:
         raise HTTPException(status_code=503, detail=f"Cannot reach dev worker at {url}")
 
 
+def _trusted_for_user(user) -> list:
+    """ה-dev worker משותף לכל המשתמשים — הרשימה נשלחת בכל בקשה, לא מ-env."""
+    try:
+        return sorted(user_trusted_set(get_service_supabase(), user["uid"]))
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[compile-check] trusted domains lookup failed: {e}")
+        return sorted(base_domains())
+
+
 # ══════════════════════════════════════════════════════════════════════
 # POST /scenarios/compile-check — בדיקת קוד Deno של כרטיס
 # ══════════════════════════════════════════════════════════════════════
@@ -106,6 +116,7 @@ def compile_check(
         "code":       body.code,
         "card_type":  body.card_type,
         "timeout_ms": body.timeout_ms or 5000,
+        "trusted_domains": _trusted_for_user(user),
     }
     if body.payload:
         worker_body["payload"] = body.payload.model_dump(exclude_none=True)
@@ -143,7 +154,10 @@ def compile_scenario(
     if not (body.scenario_json or "").strip():
         raise HTTPException(status_code=400, detail="scenario_json is required")
 
-    result = _post_worker_sync("/dev/scenario/compile", {"scenario_json": body.scenario_json})
+    result = _post_worker_sync("/dev/scenario/compile", {
+        "scenario_json":   body.scenario_json,
+        "trusted_domains": _trusted_for_user(user),
+    })
 
     if result.get("ok"):
         return {

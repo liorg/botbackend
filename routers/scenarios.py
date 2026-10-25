@@ -150,7 +150,7 @@ def _check_component_urls(comp: dict, trusted: set) -> list[dict]:
     ]
 
 
-def _check_component_deno(comp: dict) -> Optional[dict]:
+def _check_component_deno(comp: dict, trusted: list) -> Optional[dict]:
     """מריץ /dev/deno/test על עלה בודד. מחזיר issue אם נכשל, אחרת None."""
     card_type = "expect" if comp.get("type") == "card_expect" else "sender"
     try:
@@ -158,6 +158,7 @@ def _check_component_deno(comp: dict) -> Optional[dict]:
             "code":       comp.get("code") or "",
             "card_type":  card_type,
             "timeout_ms": 5000,
+            "trusted_domains": trusted,
         })
     except HTTPException as e:
         return {"source": "deno", "compId": comp.get("id"), "compType": comp.get("type"), "message": str(e.detail)}
@@ -195,15 +196,15 @@ def _run_publish_checks(row: dict, db: Client, phone_id: str) -> list[dict]:
     code_comps = [c for c in canvas if c.get("type") in ("card_sender", "card_expect") and (c.get("code") or "").strip()]
 
     # 1c) ⬅️ חדש: URLs בקוד Deno — רק https לדומיינים מהימנים
+    trusted = _trusted_for_phone(db, phone_id) if code_comps else set()
     if code_comps:
-        trusted = _trusted_for_phone(db, phone_id)
         for c in code_comps:
             issues.extend(_check_component_urls(c, trusted))
 
     # 2) בדיקת קוד Deno לכל card_sender/card_expect עם קוד (מקבילית, threads)
     if code_comps:
         with ThreadPoolExecutor(max_workers=min(8, len(code_comps))) as pool:
-            results = list(pool.map(_check_component_deno, code_comps))
+            results = list(pool.map(lambda c: _check_component_deno(c, sorted(trusted)), code_comps))
         issues.extend([r for r in results if r])
 
     # 3) קומפילציה מלאה — רק אם 1+2 נקיים
@@ -221,7 +222,10 @@ def _run_publish_checks(row: dict, db: Client, phone_id: str) -> list[dict]:
         }, ensure_ascii=False)
 
         try:
-            compile_res = _post_worker_sync("/dev/scenario/compile", {"scenario_json": scenario_json})
+            compile_res = _post_worker_sync("/dev/scenario/compile", {
+                "scenario_json":   scenario_json,
+                "trusted_domains": sorted(trusted),
+            })
         except HTTPException as e:
             issues.append({"source": "compile", "compId": None, "compType": None, "message": str(e.detail)})
         else:
