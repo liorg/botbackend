@@ -127,7 +127,7 @@ def _comp_is_valid(comp: dict) -> bool:
     if t in ("card_sender", "card_expect"):
         return bool((comp.get("code") or "").strip())
     return True
- 
+
 
 
 async def _check_component_deno(comp: dict) -> Optional[dict]:
@@ -171,7 +171,7 @@ async def _run_publish_checks(row: dict, db: Client, phone_id: str) -> list[dict
             event_type=row.get("event_type") or cfg.get("event_type", "scheduler"),
         )
     )
- 
+
 
     # 2) בדיקת קוד Deno לכל card_sender/card_expect עם קוד (מקבילית)
     code_comps = [c for c in canvas if c.get("type") in ("card_sender", "card_expect") and (c.get("code") or "").strip()]
@@ -379,9 +379,38 @@ async def publish_scenario(
 
 
 # ── Delete ─────────────────────────────────────────────────────────────────
-@router.delete("/{scenario_id}", summary="Delete scenario", description="Deletes the scenario.")
+# trigger trg_scenarios_exec_cleanup (BEFORE DELETE) מנקה קודם את זנבות הביצועים.
+# אם המחיקה נכשלת על FK אחר — Postgres מבטל את כל ההצהרה, כולל הניקוי.
+@router.delete(
+    "/{scenario_id}",
+    summary="Delete scenario",
+    description=(
+        "Deletes the scenario. A database trigger first removes everything the executions module "
+        "linked to it: if it is an execution source, the whole execution (cloned scenarios, "
+        "templates and JOB schedules on every phone); if it is a clone, that phone's schedule, "
+        "templates and link. Returns 409 when other records (schedules, calls) still reference "
+        "the scenario; in that case nothing is deleted."
+    ),
+)
 def delete_scenario(
     phone_id: str, scenario_id: str, db: Client = Depends(get_supabase)
 ):
-    db.table("scenarios").delete().eq("id", scenario_id).eq("phone_id", phone_id).execute()
+    try:
+        result = (
+            db.table("scenarios")
+            .delete()
+            .eq("id", scenario_id)
+            .eq("phone_id", phone_id)
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        msg = getattr(exc, "message", None) or str(exc)
+        if "foreign key" in msg.lower() or "23503" in msg:
+            raise HTTPException(
+                status_code=409,
+                detail="Scenario is still referenced (schedules or calls) — nothing was deleted",
+            )
+        raise HTTPException(status_code=400, detail=f"Delete failed: {msg}")
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Scenario not found")
     return {"ok": True}
