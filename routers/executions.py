@@ -79,21 +79,43 @@ def _user_id(user: dict) -> str:
 
 # ── List ───────────────────────────────────────────────────────────────────
 
-@router.get("/")
+@router.get("/",
+    summary="List executions",
+    description=(
+        "Returns all parallel executions, newest first. Each row includes the contact, the "
+        "run/JOB name, target phone numbers, source scenario and phone, cloned template count and "
+        "prefix, the number of schedules still pending or firing, and the latest schedule run "
+        "time."
+    ),
+)
 def list_executions(db: Client = Depends(get_supabase)):
     return _as_list(_rpc(db, "exec_list", {}))
 
 
 # ── Source phones (Wizard שלב 3) ──────────────────────────────────────────
 
-@router.get("/sources")
+@router.get("/sources",
+    summary="List source phones",
+    description=(
+        "Returns phones that own at least one active original scenario (clones excluded), with "
+        "the number of such scenarios. Used to choose the source phone in wizard step 3."
+    ),
+)
 def list_sources(db: Client = Depends(get_supabase)):
     return _as_list(_rpc(db, "exec_list_sources", {}))
 
 
 # ── Autocomplete — אנשי קשר active של המשתמש (Wizard שלב 1) ──────────────
 
-@router.get("/contacts")
+@router.get("/contacts",
+    summary="Search active contacts (autocomplete)",
+    description=(
+        "Autocomplete for wizard step 1. Searches the current user's active contacts across their "
+        "phones, grouped by contact number. Digits match the number, text matches the name, and "
+        "an empty query returns the contacts linked to the most phones first. Returns number, "
+        "name, phone count and phone numbers."
+    ),
+)
 def search_contacts(
     q: str = Query("", max_length=64),
     limit: int = Query(20, ge=1, le=50),
@@ -109,7 +131,14 @@ def search_contacts(
 
 # ── Seek contact (Wizard שלב 1→2) ─────────────────────────────────────────
 
-@router.get("/seek/{phone_number}")
+@router.get("/seek/{phone_number}",
+    summary="Find an active contact by number",
+    description=(
+        "Looks up a contact number (972xxxxxxxxx) and returns every phone it is active on, with "
+        "the contact id, phone status and provider for each. Responds 404 when the number is not "
+        "active on any phone."
+    ),
+)
 def seek_contact(phone_number: str, db: Client = Depends(get_supabase)):
     pn = _validate_phone_number(phone_number)
     data = _rpc(db, "exec_seek_contact", {"p_phone_number": pn})
@@ -121,7 +150,13 @@ def seek_contact(phone_number: str, db: Client = Depends(get_supabase)):
 
 # ── Scenarios of a phone (Wizard שלב 3) ───────────────────────────────────
 
-@router.post("/scenarios")
+@router.post("/scenarios",
+    summary="List scenarios of phones",
+    description=(
+        "Returns the active original scenarios (clones excluded) of the given phone ids, with "
+        "name, event type and description."
+    ),
+)
 def scenarios_for_phones(body: ScenariosQuery, db: Client = Depends(get_supabase)):
     if not body.phone_ids:
         raise HTTPException(400, "phone_ids is required")
@@ -130,14 +165,30 @@ def scenarios_for_phones(body: ScenariosQuery, db: Client = Depends(get_supabase
 
 # ── Templates used by a scenario (Wizard שלב 3/4 — תצוגה מקדימה) ─────────
 
-@router.get("/scenario-templates/{scenario_id}")
+@router.get("/scenario-templates/{scenario_id}",
+    summary="List templates used by a scenario",
+    description=(
+        "Returns the source phone's templates referenced anywhere in the scenario config (by "
+        "templateId, or by templateName and templateLang). These are the templates that will be "
+        "cloned to each target phone."
+    ),
+)
 def scenario_templates(scenario_id: str, db: Client = Depends(get_supabase)):
     return _as_list(_rpc(db, "exec_scenario_templates", {"p_scenario_id": scenario_id}))
 
 
 # ── Create ─────────────────────────────────────────────────────────────────
 
-@router.post("/")
+@router.post("/",
+    summary="Create an execution",
+    description=(
+        "Atomically creates an execution and, for each target phone: copies every template the "
+        "source scenario uses as \"{prefix}_{template}\" (approved and published, Baileys only), "
+        "clones the scenario as \"{run} {scenario}\" with template references remapped to the "
+        "copies, and creates a manual schedule named \"{run} JOB\" that does not fire until the "
+        "execution is run. Responds 409 if an execution already exists for the contact number."
+    ),
+)
 def create_execution(body: ExecutionCreate, db: Client = Depends(get_supabase)):
     pn = _validate_phone_number(body.contact_phone_number)
 
@@ -175,7 +226,14 @@ def create_execution(body: ExecutionCreate, db: Client = Depends(get_supabase)):
 
 # ── Run — next_run=now לכל ה-JOBs, ה-Scheduler יורה במקביל ────────────────
 
-@router.post("/{execution_id}/run")
+@router.post("/{execution_id}/run",
+    summary="Run an execution",
+    description=(
+        "Sets next_run=now on all of the execution's schedules so the Scheduler fires them in "
+        "parallel on its next poll. The backend never calls the Spine. Responds 409 while any "
+        "schedule is still firing."
+    ),
+)
 def run_execution(execution_id: str, db: Client = Depends(get_supabase)):
     data = _rpc(db, "exec_run", {"p_execution_id": execution_id})
     data = data if data is not None else {}
@@ -191,14 +249,27 @@ def run_execution(execution_id: str, db: Client = Depends(get_supabase)):
 
 # ── Stop ───────────────────────────────────────────────────────────────────
 
-@router.post("/{execution_id}/stop")
+@router.post("/{execution_id}/stop",
+    summary="Stop an execution",
+    description=(
+        "Pauses the execution's schedules that have not fired yet (next_run cleared) and marks "
+        "the execution stopped. Schedules already firing are not interrupted."
+    ),
+)
 def stop_execution(execution_id: str, db: Client = Depends(get_supabase)):
     return _rpc(db, "exec_stop", {"p_execution_id": execution_id})
 
 
 # ── Delete — תזמונים + תרחישים + תבניות משוכפלים ─────────────────────────
 
-@router.delete("/{execution_id}")
+@router.delete("/{execution_id}",
+    summary="Delete an execution",
+    description=(
+        "Deletes the execution and its cloned schedules, scenarios and templates. Rows still "
+        "referenced by other records (for example calls that already ran) are kept, with "
+        "schedules paused, and listed in \"kept\". Responds 409 while any schedule is firing."
+    ),
+)
 def delete_execution(execution_id: str, db: Client = Depends(get_supabase)):
     data = _rpc(db, "exec_delete", {"p_execution_id": execution_id})
     data = data if data is not None else {}
