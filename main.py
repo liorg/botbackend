@@ -21,7 +21,7 @@ from logging_config import get_logger, logging_middleware
 
 load_dotenv()
 
-version = "2.0.0.38"
+version = "2.0.0.39"
 logger = get_logger("main")
 
 BACKEND_URL = os.getenv("BACKEND_URL", "https://vid.michal-solutions.com/api").rstrip("/")
@@ -152,7 +152,7 @@ if APP_MODE == "internal":
     app.include_router(contact_connect.router, prefix="/api") 
     app.include_router(regex_ai.router, prefix="/api")
     app.include_router(auth_email.router, prefix="/api")
-     app.include_router(executions.router, prefix="/api")   
+    app.include_router(executions.router, prefix="/api")   
     
 elif APP_MODE == "client":
     # בהתחלה רק endpoints שאתה באמת רוצה לחשוף
@@ -166,6 +166,7 @@ elif APP_MODE == "client":
     app.include_router(templates_router, prefix="/api")
     app.include_router(contact_connect.router, prefix="/api") 
     app.include_router(regex_ai.router, prefix="/api")
+    app.include_router(executions.router, prefix="/api")  
 
 # ── Startup / Shutdown ────────────────────────────────────────
 @app.on_event("startup")
