@@ -82,8 +82,9 @@ OTP_TEXT = {
     "ar": "رمز التحقق الخاص بك في Grossman.Bot: {code}\nصالح لمدة {minutes} دقائق. لا تشاركه مع أي شخص.",
 }
 
+# בלי wildcard: Deno --allow-net והאימות (DNS + תעודה) עובדים על host מדויק בלבד
 DOMAIN_RE = re.compile(
-    r"^(\*\.)?(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+    r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
 )
 
 # Columns returned to a browser. Never replace with select("*"): the users
@@ -244,7 +245,10 @@ class UpdateSettingsRequest(BaseModel):
     lang: Optional[str] = Field(None, max_length=5, description="UI language code: he, en, ru or ar.")
     trusted_domain: Optional[str] = Field(
         None, max_length=253,
-        description="Trusted domain, e.g. example.com or *.example.com. Empty string clears it.",
+        description=(
+            "Trusted domain for fetch() in Deno scripts, e.g. api.example.com (no wildcards). "
+            "Verified on save: https, public DNS, valid certificate. Empty string clears it."
+        ),
     )
     notify_email: Optional[bool] = Field(None, description="Send notifications by email.")
     notify_errors_only: Optional[bool] = Field(
@@ -483,6 +487,8 @@ async def get_settings(
     description=(
         "Updates name, mobile, language, trusted domain and notification "
         "preferences. Changing mobile resets two_factor_verified (DB trigger). "
+        "A new trusted domain is verified (https, public DNS, valid certificate) and "
+        "written to trusted_domains; on failure returns 422 and nothing is saved. "
         "The avatar is set through POST /auth/avatar; package_type cannot be changed."
     ),
 )
@@ -505,11 +511,15 @@ def update_settings(
         return UpdateSettingsResponse(message="אין שינויים לעדכון", updated={})
 
     patch["updated_at"] = _now()
-    # בתוך update_settings, לפני שמירת שאר ההגדרות:
-    trusted_urls = body.get("trusted_urls")
-    if trusted_urls is not None:
-        await sync_trusted_domains(sb, user_id, trusted_urls) 
-        
+
+    # trusted_domain נשלח → אימות + trusted_domains לפני שמירת שאר ההגדרות.
+    # נכשל → 422 ושום דבר לא נשמר. ריק → כל הדומיינים של המשתמש revoked.
+    # RPC של trusted_domains פתוחים רק ל-service_role.
+    if "trusted_domain" in patch:
+        domain = patch.get("trusted_domain")
+        urls = [f"https://{domain}"] if domain else []
+        sync_trusted_domains(_public_db(), user_id, urls)
+
     try:
         db.table("users").update(patch).eq("id", user_id).execute()
     except Exception as e:

@@ -13,13 +13,13 @@ env (אופציונלי):
   TRUSTED_CERT_MIN_DAYS    7
   TRUSTED_MAX_PER_USER     20
 """
-import asyncio
 import ipaddress
 import logging
 import os
 import re
 import socket
 import ssl
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
@@ -149,15 +149,18 @@ def _check_tls(host: str, ip: str) -> dict:
     return {"cert_issuer": issuer_name, "cert_expires_at": not_after}
 
 
-def _verify_sync(url: str) -> dict:
+def verify_url(url: str) -> dict:
     host = host_from_url(url)
     ips = _resolve_public(host)
     tls = _check_tls(host, ips[0])
     return {"domain": host, "source_url": url.strip(), "resolved_ips": ips, **tls}
 
 
-async def verify_url(url: str) -> dict:
-    return await asyncio.to_thread(_verify_sync, url)
+def _try_verify(url: str):
+    try:
+        return verify_url(url)
+    except Exception as e:  # noqa: BLE001
+        return e
 
 
 # ── בדיקת compile של סקריפט — זהה ל-ScriptUrlGuard.cs ────────────────────
@@ -228,11 +231,11 @@ def _error_text(url: str, err: Exception) -> str:
     return "verification failed"
 
 
-async def add_trusted_domain(sb, user_id: str, url: str) -> dict:
+def add_trusted_domain(sb, user_id: str, url: str) -> dict:
     """דומיין בודד — לא נוגע באחרים."""
     current = list_trusted(sb, user_id)
     try:
-        v = await verify_url(url)
+        v = verify_url(url)
     except Exception as e:
         raise HTTPException(422, detail={"error": "trusted_domain_invalid",
                                          "items": [{"url": url, "error": _error_text(url, e)}]})
@@ -241,7 +244,7 @@ async def add_trusted_domain(sb, user_id: str, url: str) -> dict:
     return _upsert(sb, user_id, v)
 
 
-async def sync_trusted_domains(sb, user_id: str, urls) -> list:
+def sync_trusted_domains(sb, user_id: str, urls) -> list:
     """
     update_settings — רשימה מלאה. הכול או כלום:
     URL אחד שנכשל → 422, ושום דבר לא נכתב. מה שלא ברשימה → revoked.
@@ -250,7 +253,12 @@ async def sync_trusted_domains(sb, user_id: str, urls) -> list:
     if len(urls) > MAX_PER_USER:
         raise HTTPException(422, detail={"error": "trusted_domain_limit", "max": MAX_PER_USER})
 
-    results = await asyncio.gather(*(verify_url(u) for u in urls), return_exceptions=True)
+    # בלי event loop — threads רגילים. כל URL חסום ב-TLS_TIMEOUT_SEC.
+    if len(urls) <= 1:
+        results = [_try_verify(u) for u in urls]
+    else:
+        with ThreadPoolExecutor(max_workers=min(8, len(urls))) as pool:
+            results = list(pool.map(_try_verify, urls))
 
     errors, verified = [], {}
     for url, res in zip(urls, results):

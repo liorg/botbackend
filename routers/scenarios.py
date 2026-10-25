@@ -1,6 +1,6 @@
 # scenarios_router.py
 import json
-import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, Depends, HTTPException, Query
 from dependencies import get_supabase
 from supabase import Client
@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field
 from typing import Optional, Any, Literal
 import uuid
 from routers.template_manager import validate_scenario_templates
-from routers.compile_check import _post_worker  # ⬅️ אותו לקוח HTTP + DEV_WORKER_URL שכבר משמש את compile-check
+from routers.compile_check import _post_worker_sync  # ⬅️ אותו DEV_WORKER_URL של compile-check, בלי event loop
+from services.trusted_domains import check_script_urls, user_trusted_set, base_domains
 
 router = APIRouter(prefix="/phones/{phone_id}/scenarios", tags=["scenarios"])
 
@@ -129,12 +130,31 @@ def _comp_is_valid(comp: dict) -> bool:
     return True
 
 
+def _trusted_for_phone(db: Client, phone_id: str) -> set:
+    """דומיינים מהימנים של בעל הטלפון + רשימת הבסיס מ-env. אותה רשימה שה-provisioner נותן ל-worker."""
+    try:
+        res = db.table("phones").select("user_id").eq("id", phone_id).limit(1).execute()
+    except Exception:
+        return base_domains()
+    user_id = res.data[0].get("user_id") if res.data else None
+    if not user_id:
+        return base_domains()
+    return user_trusted_set(db, user_id)
 
-async def _check_component_deno(comp: dict) -> Optional[dict]:
+
+def _check_component_urls(comp: dict, trusted: set) -> list[dict]:
+    """כל URL בקוד Deno חייב להיות https לדומיין מהימן — מקביל ל-ScriptUrlGuard.cs."""
+    return [
+        {"source": "trusted_domain", "compId": comp.get("id"), "compType": comp.get("type"), "message": err}
+        for err in check_script_urls(comp.get("code") or "", trusted)
+    ]
+
+
+def _check_component_deno(comp: dict) -> Optional[dict]:
     """מריץ /dev/deno/test על עלה בודד. מחזיר issue אם נכשל, אחרת None."""
     card_type = "expect" if comp.get("type") == "card_expect" else "sender"
     try:
-        result = await _post_worker("/dev/deno/test", {
+        result = _post_worker_sync("/dev/deno/test", {
             "code":       comp.get("code") or "",
             "card_type":  card_type,
             "timeout_ms": 5000,
@@ -148,7 +168,7 @@ async def _check_component_deno(comp: dict) -> Optional[dict]:
     return None
 
 
-async def _run_publish_checks(row: dict, db: Client, phone_id: str) -> list[dict]:
+def _run_publish_checks(row: dict, db: Client, phone_id: str) -> list[dict]:
     """ולידציה + Deno per-leaf + Compile מלא — אותו סדר שרץ בצד הלקוח, נאכף עכשיו גם בשרת."""
     issues: list[dict] = []
     cfg    = row.get("config") or {}
@@ -172,11 +192,18 @@ async def _run_publish_checks(row: dict, db: Client, phone_id: str) -> list[dict
         )
     )
 
-
-    # 2) בדיקת קוד Deno לכל card_sender/card_expect עם קוד (מקבילית)
     code_comps = [c for c in canvas if c.get("type") in ("card_sender", "card_expect") and (c.get("code") or "").strip()]
+
+    # 1c) ⬅️ חדש: URLs בקוד Deno — רק https לדומיינים מהימנים
     if code_comps:
-        results = await asyncio.gather(*[_check_component_deno(c) for c in code_comps])
+        trusted = _trusted_for_phone(db, phone_id)
+        for c in code_comps:
+            issues.extend(_check_component_urls(c, trusted))
+
+    # 2) בדיקת קוד Deno לכל card_sender/card_expect עם קוד (מקבילית, threads)
+    if code_comps:
+        with ThreadPoolExecutor(max_workers=min(8, len(code_comps))) as pool:
+            results = list(pool.map(_check_component_deno, code_comps))
         issues.extend([r for r in results if r])
 
     # 3) קומפילציה מלאה — רק אם 1+2 נקיים
@@ -194,7 +221,7 @@ async def _run_publish_checks(row: dict, db: Client, phone_id: str) -> list[dict
         }, ensure_ascii=False)
 
         try:
-            compile_res = await _post_worker("/dev/scenario/compile", {"scenario_json": scenario_json})
+            compile_res = _post_worker_sync("/dev/scenario/compile", {"scenario_json": scenario_json})
         except HTTPException as e:
             issues.append({"source": "compile", "compId": None, "compType": None, "message": str(e.detail)})
         else:
@@ -344,8 +371,8 @@ def update_scenario(
 
 
 # ── Publish ────────────────────────────────────────────────────────────────
-@router.post("/{scenario_id}/publish", summary="Publish scenario", description="Validates components, scheduler templates and Deno code, compiles on the Worker, then sets status to active. Returns 422 with issues when a check fails.")
-async def publish_scenario(
+@router.post("/{scenario_id}/publish", summary="Publish scenario", description="Validates components, scheduler templates, trusted domains in script URLs and Deno code, compiles on the Worker, then sets status to active. Returns 422 with issues when a check fails.")
+def publish_scenario(
     phone_id: str, scenario_id: str, db: Client = Depends(get_supabase)
 ):
     # ⬅️ שולפים את השורה המלאה (כולל config) — לא רק לבדוק שהיא קיימת
@@ -360,9 +387,8 @@ async def publish_scenario(
     if not existing.data:
         raise HTTPException(status_code=404, detail="Scenario not found")
 
-    # ⬅️ ולידציה + Deno + Compile — נאכף בשרת, לא רק ב-UI
-    # issues = await _run_publish_checks(existing.data)
-    issues = await _run_publish_checks(existing.data, db, phone_id)
+    # ⬅️ ולידציה + Trusted domains + Deno + Compile — נאכף בשרת, לא רק ב-UI
+    issues = _run_publish_checks(existing.data, db, phone_id)
     if issues:
         raise HTTPException(status_code=422, detail={"ok": False, "issues": issues})
 

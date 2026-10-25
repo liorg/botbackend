@@ -58,6 +58,23 @@ class ScenarioCompileRequest(BaseModel):
 # Worker calls
 # ══════════════════════════════════════════════════════════════════════
 
+def _post_worker_sync(path: str, payload: dict) -> dict:
+    """גרסה סינכרונית — בלי event loop. אותו טיפול בשגיאות כמו _post_worker."""
+    url = f"{DEV_WORKER_URL}{path}"
+    try:
+        with httpx.Client(timeout=WORKER_TIMEOUT) as client:
+            resp = client.post(url, json=payload)
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.HTTPStatusError as e:
+        logger.error(f"[compile-check] worker {url} → {e.response.status_code}: {e.response.text[:300]}")
+        raise HTTPException(status_code=502, detail=f"Worker error: {e.response.text[:300]}")
+    except httpx.RequestError as e:
+        logger.error(f"[compile-check] cannot reach dev worker at {url}: {e}")
+        raise HTTPException(status_code=503, detail=f"Cannot reach dev worker at {url}")
+
+
+# נשאר לתאימות לאחור אם משהו אחר עדיין עושה await
 async def _post_worker(path: str, payload: dict) -> dict:
     url = f"{DEV_WORKER_URL}{path}"
     try:
@@ -78,7 +95,7 @@ async def _post_worker(path: str, payload: dict) -> dict:
 # ══════════════════════════════════════════════════════════════════════
 
 @compile_router.post("/compile-check")
-async def compile_check(
+def compile_check(
     body: CompileCheckRequest,
     user=Depends(get_current_user),
 ):
@@ -93,7 +110,7 @@ async def compile_check(
     if body.payload:
         worker_body["payload"] = body.payload.model_dump(exclude_none=True)
 
-    result = await _post_worker("/dev/deno/test", worker_body)
+    result = _post_worker_sync("/dev/deno/test", worker_body)
 
     # נרמול לצורה שה-UI (CodeEditor → CheckResultBadge) מצפה לה
     if bool(result.get("ok")):
@@ -119,14 +136,14 @@ async def compile_check(
 # ══════════════════════════════════════════════════════════════════════
 
 @compile_router.post("/compile")
-async def compile_scenario(
+def compile_scenario(
     body: ScenarioCompileRequest,
     user=Depends(get_current_user),
 ):
     if not (body.scenario_json or "").strip():
         raise HTTPException(status_code=400, detail="scenario_json is required")
 
-    result = await _post_worker("/dev/scenario/compile", {"scenario_json": body.scenario_json})
+    result = _post_worker_sync("/dev/scenario/compile", {"scenario_json": body.scenario_json})
 
     if result.get("ok"):
         return {
