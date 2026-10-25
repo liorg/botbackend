@@ -42,6 +42,8 @@ from dependencies import (
     get_service_supabase,
     get_supabase,
 )
+from services.trusted_domains import sync_trusted_domains
+
 from google.cloud import storage
 from logging_config import get_logger
 
@@ -503,7 +505,11 @@ def update_settings(
         return UpdateSettingsResponse(message="אין שינויים לעדכון", updated={})
 
     patch["updated_at"] = _now()
-
+    # בתוך update_settings, לפני שמירת שאר ההגדרות:
+    trusted_urls = body.get("trusted_urls")
+    if trusted_urls is not None:
+        await sync_trusted_domains(sb, user_id, trusted_urls) 
+        
     try:
         db.table("users").update(patch).eq("id", user_id).execute()
     except Exception as e:
