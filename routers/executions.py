@@ -14,11 +14,11 @@
 import re
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from supabase import Client
 
-from dependencies import get_supabase
+from dependencies import get_current_user, get_supabase
 
 router = APIRouter(prefix="/executions", tags=["executions"])
 
@@ -70,6 +70,13 @@ def _as_list(data):
     return data if data is not None else []
 
 
+def _user_id(user: dict) -> str:
+    uid = user.get("uid") if user.get("uid") is not None else user.get("id")
+    if not uid:
+        raise HTTPException(401, "user id missing in token")
+    return uid
+
+
 # ── List ───────────────────────────────────────────────────────────────────
 
 @router.get("/")
@@ -82,6 +89,22 @@ def list_executions(db: Client = Depends(get_supabase)):
 @router.get("/sources")
 def list_sources(db: Client = Depends(get_supabase)):
     return _as_list(_rpc(db, "exec_list_sources", {}))
+
+
+# ── Autocomplete — אנשי קשר active של המשתמש (Wizard שלב 1) ──────────────
+
+@router.get("/contacts")
+def search_contacts(
+    q: str = Query("", max_length=64),
+    limit: int = Query(20, ge=1, le=50),
+    db: Client = Depends(get_supabase),
+    user: dict = Depends(get_current_user),
+):
+    return _as_list(_rpc(db, "exec_search_contacts", {
+        "p_user_id": _user_id(user),
+        "p_q": q.strip(),
+        "p_limit": limit,
+    }))
 
 
 # ── Seek contact (Wizard שלב 1→2) ─────────────────────────────────────────
