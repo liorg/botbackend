@@ -91,12 +91,12 @@ class ProvisionResponse(BaseModel):
     phone_id: Optional[str] = Field(None, description="Phone id.")
     phone_number: str = Field(..., description="Number, digits only.")
     is_new: bool = Field(..., description="True when a new phone was created.")
-    status: str = Field(..., description="Link status, for example qr_ready.")
+    status: Optional[str] = Field(None, description="Link status, for example qr_ready.")
     qr_image_base64: Optional[str] = Field(None, description="QR code as a base64 image.")
     qr_code: Optional[str] = Field(None, description="Raw QR code string.")
     qr_refresh_url: Optional[str] = Field(None, description="Agent URL to fetch a fresh QR code.")
     message: Optional[str] = Field(None, description="Message from the agent.")
-    host_name: str = Field(..., description="Agent host the phone runs on.")
+    host_name: Optional[str] = Field(None, description="Agent host the phone runs on.")
     pairing_code: Optional[str] = Field(None, description="Pairing code, when linking by code.")
 
 
