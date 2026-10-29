@@ -12,13 +12,14 @@
 #   app.include_router(executions.router, prefix="/api")
 
 import re
-from typing import List
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from supabase import Client
 
 from dependencies import get_current_user, get_supabase
+from routers.common_schemas import Passthrough
 
 router = APIRouter(prefix="/executions", tags=["executions"])
 
@@ -29,20 +30,66 @@ MAX_NAME = 80
 # ── Schemas ────────────────────────────────────────────────────────────────
 
 class ExecutionTarget(BaseModel):
-    phone_id: str
-    contact_id: str
+    phone_id: str = Field(..., description="Target phone that runs the cloned scenario.")
+    contact_id: str = Field(..., description="Active contact on that phone.")
 
 
 class ExecutionCreate(BaseModel):
-    name: str                       # שם הריצה
-    contact_phone_number: str       # "972xxxxxxxxx"
-    source_scenario_id: str
-    template_prefix: str            # a-z0-9_
-    targets: List[ExecutionTarget]
+    name: str = Field(..., description="Run name, up to 80 characters. Used in the clone and JOB names.")                       # שם הריצה
+    contact_phone_number: str = Field(..., description="Contact number, 972xxxxxxxxx.")       # "972xxxxxxxxx"
+    source_scenario_id: str = Field(..., description="Scenario to clone.")
+    template_prefix: str = Field(..., description="Prefix for copied templates: ^[a-z][a-z0-9_]{0,39}$.")            # a-z0-9_
+    targets: List[ExecutionTarget] = Field(..., description="Target phones, each with its contact. No duplicate phones.")
 
 
 class ScenariosQuery(BaseModel):
-    phone_ids: List[str]
+    phone_ids: List[str] = Field(..., description="Phones whose scenarios to list.")
+
+
+# ── Response Schemas ───────────────────────────────────────────────────────
+# Every endpoint returns an exec_* RPC result. Declared fields are the ones the
+# router itself relies on; everything else the RPC returns is kept.
+
+class ExecutionListItem(Passthrough):
+    """exec_list row."""
+
+
+class SourcePhoneItem(Passthrough):
+    """exec_list_sources row."""
+
+
+class ContactSearchItem(Passthrough):
+    """exec_search_contacts row."""
+
+
+class SeekContactResponse(Passthrough):
+    """exec_seek_contact result."""
+    phones: list[Any] = Field(..., description="Phones the number is active on, with contact id, phone status and provider.")
+
+
+class ExecutionScenarioItem(Passthrough):
+    """exec_list_scenarios row."""
+
+
+class ScenarioTemplateItem(Passthrough):
+    """exec_scenario_templates row."""
+
+
+class ExecutionCreateResponse(Passthrough):
+    """exec_create result."""
+
+
+class ExecutionRunResponse(Passthrough):
+    """exec_run result."""
+    execution_id: str = Field(..., description="Execution id.")
+
+
+class ExecutionStopResponse(Passthrough):
+    """exec_stop result."""
+
+
+class ExecutionDeleteResponse(Passthrough):
+    """exec_delete result; kept lists rows still referenced elsewhere."""
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -80,6 +127,7 @@ def _user_id(user: dict) -> str:
 # ── List ───────────────────────────────────────────────────────────────────
 
 @router.get("/",
+    response_model=list[ExecutionListItem],
     summary="List executions",
     description=(
         "Returns all parallel executions, newest first. Each row includes the contact, the "
@@ -95,6 +143,7 @@ def list_executions(db: Client = Depends(get_supabase)):
 # ── Source phones (Wizard שלב 3) ──────────────────────────────────────────
 
 @router.get("/sources",
+    response_model=list[SourcePhoneItem],
     summary="List source phones",
     description=(
         "Returns phones that own at least one active original scenario (clones excluded), with "
@@ -108,6 +157,7 @@ def list_sources(db: Client = Depends(get_supabase)):
 # ── Autocomplete — אנשי קשר active של המשתמש (Wizard שלב 1) ──────────────
 
 @router.get("/contacts",
+    response_model=list[ContactSearchItem],
     summary="Search active contacts (autocomplete)",
     description=(
         "Autocomplete for wizard step 1. Searches the current user's active contacts across their "
@@ -132,6 +182,7 @@ def search_contacts(
 # ── Seek contact (Wizard שלב 1→2) ─────────────────────────────────────────
 
 @router.get("/seek/{phone_number}",
+    response_model=SeekContactResponse,
     summary="Find an active contact by number",
     description=(
         "Looks up a contact number (972xxxxxxxxx) and returns every phone it is active on, with "
@@ -151,6 +202,7 @@ def seek_contact(phone_number: str, db: Client = Depends(get_supabase)):
 # ── Scenarios of a phone (Wizard שלב 3) ───────────────────────────────────
 
 @router.post("/scenarios",
+    response_model=list[ExecutionScenarioItem],
     summary="List scenarios of phones",
     description=(
         "Returns the active original scenarios (clones excluded) of the given phone ids, with "
@@ -166,6 +218,7 @@ def scenarios_for_phones(body: ScenariosQuery, db: Client = Depends(get_supabase
 # ── Templates used by a scenario (Wizard שלב 3/4 — תצוגה מקדימה) ─────────
 
 @router.get("/scenario-templates/{scenario_id}",
+    response_model=list[ScenarioTemplateItem],
     summary="List templates used by a scenario",
     description=(
         "Returns the source phone's templates referenced anywhere in the scenario config (by "
@@ -180,6 +233,7 @@ def scenario_templates(scenario_id: str, db: Client = Depends(get_supabase)):
 # ── Create ─────────────────────────────────────────────────────────────────
 
 @router.post("/",
+    response_model=ExecutionCreateResponse,
     summary="Create an execution",
     description=(
         "Atomically creates an execution and, for each target phone: copies every template the "
@@ -227,6 +281,7 @@ def create_execution(body: ExecutionCreate, db: Client = Depends(get_supabase)):
 # ── Run — next_run=now לכל ה-JOBs, ה-Scheduler יורה במקביל ────────────────
 
 @router.post("/{execution_id}/run",
+    response_model=ExecutionRunResponse,
     summary="Run an execution",
     description=(
         "Sets next_run=now on all of the execution's schedules so the Scheduler fires them in "
@@ -250,6 +305,7 @@ def run_execution(execution_id: str, db: Client = Depends(get_supabase)):
 # ── Stop ───────────────────────────────────────────────────────────────────
 
 @router.post("/{execution_id}/stop",
+    response_model=ExecutionStopResponse,
     summary="Stop an execution",
     description=(
         "Pauses the execution's schedules that have not fired yet (next_run cleared) and marks "
@@ -263,6 +319,7 @@ def stop_execution(execution_id: str, db: Client = Depends(get_supabase)):
 # ── Delete — תזמונים + תרחישים + תבניות משוכפלים ─────────────────────────
 
 @router.delete("/{execution_id}",
+    response_model=ExecutionDeleteResponse,
     summary="Delete an execution",
     description=(
         "Deletes the execution and its cloned schedules, scenarios and templates. Rows still "

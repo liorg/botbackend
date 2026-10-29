@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from supabase import Client
 
 from dependencies import get_current_user, get_supabase
+from routers.messages import ChatMessage
 
 
 router = APIRouter(
@@ -29,8 +30,7 @@ def _key(phone_id: str, contact_id: str) -> str:
 
 
 class MessagePayload(BaseModel):
-    """
-    Payload שמגיע מ-HostAgent ב-camelCase:
+    """Payload from the HostAgent, camelCase:
 
     {
         "messageId": "...",
@@ -48,30 +48,42 @@ class MessagePayload(BaseModel):
     # messages.id
     message_id: str = Field(
         default="",
-        alias="messageId",
+        alias="messageId", description="messages.id of the stored message.",
     )
 
     # מזהה WhatsApp/Baileys
     whatsapp_message_id: str = Field(
         default="",
-        alias="whatsAppMessageId",
+        alias="whatsAppMessageId", description="WhatsApp / Baileys message id.",
     )
 
     phone_id: str = Field(
         default="",
-        alias="phoneId",
+        alias="phoneId", description="Phone id.",
     )
 
     contact_id: str = Field(
         default="",
-        alias="contactId",
+        alias="contactId", description="Contact id.",
     )
 
     # true = incoming, false = outgoing
     direction: bool = Field(
         default=False,
-        alias="direction",
+        alias="direction", description="True = incoming, false = outgoing.",
     )
+
+
+class CallbackResponse(BaseModel):
+    ok: bool = Field(..., description="False when phoneId or contactId is missing.")
+    error: Optional[str] = Field(None, description="Set when ok is false.")
+    message_id: Optional[str] = Field(None, description="messages.id from the payload.")
+    whatsapp_message_id: Optional[str] = Field(None, description="WhatsApp message id from the payload.")
+    call_id: Optional[str] = Field(None, description="Active recording call the message was linked to.")
+
+
+class PollResponse(BaseModel):
+    messages: list[ChatMessage] = Field(..., description="Messages received since the last poll, formatted for the chat view.")
 
 
 def _resolve_recording_call_id(
@@ -137,7 +149,7 @@ def _resolve_recording_call_id(
     )
 
 
-@router.post("/callback")
+@router.post("/callback", response_model=CallbackResponse, summary="Recording callback", description="Called by the HostAgent after it stores a message. Links the message to the active recording call (also through the parent contact) and queues it for polling.")
 def receive_callback(
     body: MessagePayload,
     db: Client = Depends(get_supabase),
@@ -244,7 +256,7 @@ def receive_callback(
     }
 
 
-@router.get("/poll/{phone_id}/{contact_id}")
+@router.get("/poll/{phone_id}/{contact_id}", response_model=PollResponse, summary="Poll recording messages", description="Returns the messages queued for the phone and contact since the last poll, formatted for the chat view. Each message is returned once.")
 def poll_messages(
     phone_id: str,
     contact_id: str,

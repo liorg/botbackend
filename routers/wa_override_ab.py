@@ -24,10 +24,14 @@ import hmac
 import json
 import os
 
+from typing import Any, Optional, Union
+
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request, Response
+from pydantic import BaseModel, Field
 
 from logging_config import get_logger
+from routers.common_schemas import OkResponse
 
 logger = get_logger("wa_ab")
 
@@ -50,6 +54,57 @@ _dump_left = int(os.getenv("WA_DUMP_HEADERS", "3"))
 #
 # ה-hooks עצמם **לא** מאחורי השער: מטא חייבת להגיע אליהם.
 DEBUG_TOKEN = os.getenv("WA_DEBUG_TOKEN", "")
+
+
+# ══════════════════════════════════════════════ Response Schemas
+
+class SigStatusResponse(BaseModel):
+    loaded: bool = Field(..., description="True when WA_APP_SECRET is set.")
+    hint: Optional[str] = Field(None, description="What to fix when it is not loaded.")
+    len: Optional[int] = Field(None, description="Secret length.")
+    looks_like_app_secret: Optional[bool] = Field(None, description="True for 32 hex characters.")
+    sha256: Optional[str] = Field(None, description="SHA-256 of the secret, to compare with whqueue.")
+
+
+class GraphResult(BaseModel):
+    ok: bool = Field(..., description="True for HTTP status below 400.")
+    status: int = Field(..., description="HTTP status from the Graph API.")
+    body: Any = Field(None, description="Graph API response body.")
+
+
+class WhereResponse(BaseModel):
+    phone_number_id: str = Field(..., description="Meta phone number id.")
+    level_phone: Optional[str] = Field(None, description="Override at phone number level.")
+    level_waba: Optional[str] = Field(None, description="Override at WABA level.")
+    level_app: Optional[str] = Field(None, description="Callback at app level.")
+    effective: Optional[str] = Field(None, description="URL Meta actually sends to.")
+    graph: GraphResult = Field(..., description="Raw Graph API result.")
+
+
+class DiagStep(BaseModel):
+    step: str = Field(..., description="Check name.")
+    ok: bool = Field(..., description="True when the check passed.")
+    detail: str = Field("", description="What was found.")
+
+
+class DiagLevels(BaseModel):
+    phone: Optional[str] = Field(None, description="Phone-level override.")
+    waba: Optional[str] = Field(None, description="WABA-level override.")
+    app: Optional[str] = Field(None, description="App-level callback.")
+    effective: Optional[str] = Field(None, description="URL Meta actually sends to.")
+
+
+class DiagResponse(BaseModel):
+    phone_number_id: str = Field(..., description="Meta phone number id.")
+    steps: list[DiagStep] = Field(..., description="Checks in the order they fail in practice.")
+    verdict: str = Field(..., description="First failing check, in plain words.")
+    levels: Optional[DiagLevels] = Field(None, description="Callback URL per level.")
+    app_secret_loaded: Optional[bool] = Field(None, description="True when WA_APP_SECRET is set.")
+
+
+class SwitchError(BaseModel):
+    ok: bool = Field(False, description="Always false.")
+    error: str = Field(..., description="What was wrong with the request.")
 
 
 def gate(request: Request) -> None:
@@ -91,7 +146,7 @@ def check_signature(raw: bytes, header: str) -> dict:
 
 # ══════════════════════════════════════════════ שני הקולטים
 
-@router.get("/hook/{slot}")
+@router.get("/hook/{slot}", summary="Webhook verification (A/B)", description="Meta verification handshake for hook a or b. Returns hub.challenge when the verify token matches; otherwise 403.")
 async def verify(
     slot: str,
     hub_mode: str = Query(None, alias="hub.mode"),
@@ -108,7 +163,7 @@ async def verify(
     return Response(content="forbidden", status_code=403)
 
 
-@router.post("/hook/{slot}")
+@router.post("/hook/{slot}", response_model=OkResponse, summary="Receive webhook (A/B)", description="Logs incoming messages and statuses with the hook label and checks X-Hub-Signature-256 against WA_APP_SECRET. Logs only: never rejects and triggers no pipeline.")
 async def receive(slot: str, request: Request):
     """מקבל הודעות וסטטוסים. רק לוג — לא מפעיל שום פייפליין."""
     global _dump_left
@@ -167,7 +222,7 @@ async def receive(slot: str, request: Request):
     return {"ok": True}
 
 
-@router.get("/sig-status")
+@router.get("/sig-status", response_model=SigStatusResponse, summary="App secret status", description="Debug (X-Debug-Token). Shows whether WA_APP_SECRET is loaded and its SHA-256, to compare with whqueue. Returns 404 without the token.")
 async def sig_status(request: Request):
     """
     בלי להריץ webhook: האם הסוד בכלל טעון, ומה טביעת האצבע שלו.
@@ -208,7 +263,7 @@ async def _graph(method: str, pnid: str, **kw) -> dict:
     return {"ok": r.status_code < 400, "status": r.status_code, "body": body}
 
 
-@router.get("/where/{pnid}")
+@router.get("/where/{pnid}", response_model=WhereResponse, summary="Where the number sends", description="Debug (X-Debug-Token). Returns the webhook callback set at phone, WABA and app level, and the effective one.")
 async def where(pnid: str, request: Request = None):
     """לאן המספר הזה שולח כרגע."""
     if request is not None:
@@ -228,7 +283,7 @@ async def where(pnid: str, request: Request = None):
     }
 
 
-@router.get("/diag/{pnid}")
+@router.get("/diag/{pnid}", response_model=DiagResponse, summary="Diagnose missing webhooks", description="Debug (X-Debug-Token). Checks the token and number, the app subscription to the WABA (send ?waba=), and the override, and returns the first failing check as the verdict.")
 async def diag(request: Request, pnid: str, waba: str = ""):
     """
     למה לא מגיע — בקריאה אחת.
@@ -326,7 +381,7 @@ async def diag(request: Request, pnid: str, waba: str = ""):
     return out
 
 
-@router.post("/switch/{pnid}/{slot}")
+@router.post("/switch/{pnid}/{slot}", response_model=Union[WhereResponse, GraphResult, SwitchError], summary="Switch override A/B/off", description="Debug (X-Debug-Token). Points the number's webhook override to hook a or b, or removes it with off, then returns where it points.")
 async def switch(request: Request, pnid: str, slot: str):
     """
     slot = a | b | off

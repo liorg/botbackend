@@ -7,7 +7,7 @@ import os
 import asyncio
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
 from datetime import datetime, timedelta, timezone
 
@@ -43,6 +43,120 @@ class ProvisionRequest(BaseModel):
     nickname: Optional[str] = Field(None, description="Nickname passed to the agent.")
     tag: Optional[str] = Field(None, description="Tag passed to the agent.")
     use_pairing_code: Optional[bool] = Field(None, description="Link with a pairing code instead of a QR code.")  # 22
+
+
+class UpdatePhoneRequest(BaseModel):
+    label: Optional[str] = Field(None, description="Display label of the phone.")
+    color: Optional[str] = Field(None, description="Display color of the phone.")
+    lang: Optional[str] = Field(None, description="Language code of the phone.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Response Schemas
+# ══════════════════════════════════════════════════════════════════════════════
+# response_model filters the output: anything not declared here is dropped,
+# so creds_base64 can never reach the browser even if a query selects "*".
+
+class PhoneResponse(BaseModel):
+    id: str = Field(..., description="Phone id.")
+    user_id: str = Field(..., description="Owner of the phone.")
+    number: str = Field(..., description="Phone number, digits only.")
+    label: Optional[str] = Field(None, description="Display label.")
+    color: Optional[str] = Field(None, description="Display color.")
+    status: Optional[str] = Field(None, description="Connection status reported by the agent.")
+    docker_status: Optional[str] = Field(None, description="Container status.")
+    created_at: Optional[str] = Field(None, description="ISO 8601 timestamp, as stored.")
+    provider: Optional[str] = Field(None, description="baileys or another provider.")
+    lang: Optional[str] = Field(None, description="Default language of the phone.")
+    pairing_code: Optional[str] = Field(None, description="Current pairing code, when pairing by code.")
+    pairing_code_expiry: Optional[str] = Field(None, description="When the pairing code expires. ISO 8601 timestamp, as stored.")
+    use_pairing_code: Optional[bool] = Field(None, description="True when the phone links with a pairing code instead of a QR code.")
+
+
+class AgentHostHealth(BaseModel):
+    host_id: str = Field(..., description="Agent host id.")
+    host_name: str = Field(..., description="Agent host name.")
+    ip_address: str = Field(..., description="Agent host IP.")
+    last_heartbeat: Optional[str] = Field(None, description="Last successful health check. ISO 8601 timestamp, as stored.")
+    healthy: bool = Field(..., description="Result of this health check.")
+
+
+class AgentsHealthResponse(BaseModel):
+    total: int = Field(..., description="Active hosts checked.")
+    healthy: int = Field(..., description="Hosts that answered healthy.")
+    hosts: list[AgentHostHealth] = Field(..., description="Result per host.")
+
+
+class ProvisionResponse(BaseModel):
+    phone_id: Optional[str] = Field(None, description="Phone id.")
+    phone_number: str = Field(..., description="Number, digits only.")
+    is_new: bool = Field(..., description="True when a new phone was created.")
+    status: str = Field(..., description="Link status, for example qr_ready.")
+    qr_image_base64: Optional[str] = Field(None, description="QR code as a base64 image.")
+    qr_code: Optional[str] = Field(None, description="Raw QR code string.")
+    qr_refresh_url: Optional[str] = Field(None, description="Agent URL to fetch a fresh QR code.")
+    message: Optional[str] = Field(None, description="Message from the agent.")
+    host_name: str = Field(..., description="Agent host the phone runs on.")
+    pairing_code: Optional[str] = Field(None, description="Pairing code, when linking by code.")
+
+
+class QrCodeResponse(BaseModel):
+    status: Optional[str] = Field(None, description="Connection status.")
+    qr_image_base64: Optional[str] = Field(None, description="QR code as a base64 image.")
+    qr_code: Optional[str] = Field(None, description="Raw QR code string.")
+    message: Optional[str] = Field(None, description="Message from the agent.")
+    pairing_code: Optional[str] = Field(None, description="Current pairing code.")
+
+
+class PairingCodeRefreshResponse(BaseModel):
+    status: Optional[str] = Field(None, description="Connection status.")
+    pairing_code: Optional[str] = Field(None, description="New pairing code.")
+    message: Optional[str] = Field(None, description="Message from the agent.")
+    poll_url: Optional[str] = Field(None, description="Agent URL to poll for the link result.")
+
+
+class AgentActionResponse(BaseModel):
+    """Pass-through of the .NET agent reply. Extra keys are kept as-is."""
+    model_config = ConfigDict(extra="allow")
+
+    success: Optional[bool] = Field(None, description="Whether the agent performed the action.")
+    status: Optional[str] = Field(None, description="Status reported by the agent.")
+    message: Optional[str] = Field(None, description="Message from the agent.")
+
+
+class OkResponse(BaseModel):
+    ok: bool = Field(True, description="True when the operation succeeded.")
+
+
+class DockerStatusResponse(BaseModel):
+    id: Optional[str] = Field(None, description="Phone id.")
+    docker_status: Optional[str] = Field(None, description="Stored container status.")
+    docker_url: Optional[str] = Field(None, description="Stored container URL.")
+
+
+class SeedTemplateCheck(BaseModel):
+    name: str = Field(..., description="Seed template name.")
+    lang: str = Field(..., description="Seed template language.")
+    local_valid: bool = Field(..., description="True when local validation passed.")
+    local_issues: list = Field([], description="Local validation issues.")
+    already_exists: bool = Field(..., description="True when the template already exists for the phone.")
+    agent: dict = Field(..., description="Agent dry-run result, or skipped.")
+
+
+class SeedTemplatesTestResponse(BaseModel):
+    phone_id: str = Field(..., description="Phone id.")
+    host: str = Field(..., description="Agent host name.")
+    supports_templates: bool = Field(..., description="True when the phone's provider supports templates.")
+    total: int = Field(..., description="Seed templates checked.")
+    passed: int = Field(..., description="Templates that passed local and agent checks.")
+    checks: list[SeedTemplateCheck] = Field(..., description="Result per template.")
+
+
+class CreateSeedResponse(BaseModel):
+    created: bool = Field(..., description="True when the template was created now.")
+    reason: Optional[str] = Field(None, description="Why it was not created.")
+    template: Optional[dict] = Field(None, description="Existing template, when it already existed.")
+    agent: Optional[dict] = Field(None, description="Agent reply, when created.")
 
 
 # ── 2FA ─────────────────────────────────────────────────────────────────────
@@ -196,7 +310,7 @@ PHONE_COLUMNS = (
     "use_pairing_code"
 )
 
-@router.get("/", summary="List my phones", description="Returns the phones owned by the current user. Session credentials are never included.")
+@router.get("/", response_model=list[PhoneResponse], summary="List my phones", description="Returns the phones owned by the current user. Session credentials are never included.")
 def list_phones(user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     result = (
         db.table("phones")
@@ -206,7 +320,7 @@ def list_phones(user=Depends(get_current_user), db: Client = Depends(get_supabas
     )
     return result.data
 
-@internal_route(router.get("/agents/health", summary="Check agent hosts health", description="Internal. Health-checks every active agent host, refreshes last_heartbeat on healthy ones and returns a summary."))
+@internal_route(router.get("/agents/health", response_model=AgentsHealthResponse, summary="Check agent hosts health", description="Internal. Health-checks every active agent host, refreshes last_heartbeat on healthy ones and returns a summary."))
 async def agents_health(user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     hosts = await _get_active_hosts(db)
     results = []
@@ -295,7 +409,7 @@ async def _ensure_seed_templates(db: Client, phone_id: str, host: dict) -> None:
         except httpx.RequestError as e:
             logger.warning(f"[TPL] seed {spec['name']} unreachable: {e}")
             
-@router.post("/provision", summary="Provision phone", description="Creates a phone for the current user, or reuses the one with the same number, on a healthy agent host. Seeds the default templates and returns the QR code or pairing code used to link WhatsApp.")
+@router.post("/provision", response_model=ProvisionResponse, summary="Provision phone", description="Creates a phone for the current user, or reuses the one with the same number, on a healthy agent host. Seeds the default templates and returns the QR code or pairing code used to link WhatsApp.")
 async def provision_phone(
     body: ProvisionRequest,
     user=Depends(get_current_user),
@@ -403,7 +517,7 @@ async def provision_phone(
         raise HTTPException(status_code=503, detail="Agent unreachable after 3 attempts")
 
 
-@router.get("/{phone_id}/qrcode", summary="Get QR code", description="Returns the current QR code, pairing code and connection status of the phone from its agent host.")
+@router.get("/{phone_id}/qrcode", response_model=QrCodeResponse, summary="Get QR code", description="Returns the current QR code, pairing code and connection status of the phone from its agent host.")
 async def get_qr_code(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     host = await _get_host_for_phone(db, phone_id)
     if not host:
@@ -427,7 +541,7 @@ async def get_qr_code(phone_id: str, user=Depends(get_current_user), db: Client 
 
     }
 
-@router.post("/{phone_id}/pairing-code/refresh", summary="Refresh pairing code", description="Asks the agent host to generate a new pairing code for the phone.")
+@router.post("/{phone_id}/pairing-code/refresh", response_model=PairingCodeRefreshResponse, summary="Refresh pairing code", description="Asks the agent host to generate a new pairing code for the phone.")
 async def refresh_pairing_code(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     host = await _get_host_for_phone(db, phone_id)
     if not host:
@@ -447,7 +561,7 @@ async def refresh_pairing_code(phone_id: str, user=Depends(get_current_user), db
         "poll_url":     data.get("pollUrl"),
     }
     
-@router.post("/{phone_id}/pause", summary="Pause phone", description="Pauses the phone on its agent host.")
+@router.post("/{phone_id}/pause", response_model=AgentActionResponse, summary="Pause phone", description="Pauses the phone on its agent host.")
 async def pause_phone(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     host = await _get_host_for_phone(db, phone_id)
     if not host:
@@ -460,7 +574,7 @@ async def pause_phone(phone_id: str, user=Depends(get_current_user), db: Client 
         raise HTTPException(status_code=503, detail="Agent unreachable")
 
 
-@router.post("/{phone_id}/resume", summary="Resume phone", description="Resumes a paused phone on its agent host.")
+@router.post("/{phone_id}/resume", response_model=AgentActionResponse, summary="Resume phone", description="Resumes a paused phone on its agent host.")
 async def resume_phone(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     host = await _get_host_for_phone(db, phone_id)
     if not host:
@@ -473,7 +587,7 @@ async def resume_phone(phone_id: str, user=Depends(get_current_user), db: Client
         raise HTTPException(status_code=503, detail="Agent unreachable")
 
 
-@router.post("/{phone_id}/logout", summary="Log out phone", description="Logs the phone out of WhatsApp on its agent host.")
+@router.post("/{phone_id}/logout", response_model=AgentActionResponse, summary="Log out phone", description="Logs the phone out of WhatsApp on its agent host.")
 async def logout_phone(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     host = await _get_host_for_phone(db, phone_id)
     if not host:
@@ -486,7 +600,7 @@ async def logout_phone(phone_id: str, user=Depends(get_current_user), db: Client
         raise HTTPException(status_code=503, detail="Agent unreachable")
 
 
-@router.post("/{phone_id}/send/text", summary="Send text message", description="Sends a WhatsApp text message from the phone through its agent host. Requires jid (or the legacy to) and text.")
+@router.post("/{phone_id}/send/text", response_model=AgentActionResponse, summary="Send text message", description="Sends a WhatsApp text message from the phone through its agent host. Requires jid (or the legacy to) and text.")
 async def send_text_message(
     phone_id: str,
     body: SendTextRequest,
@@ -514,13 +628,7 @@ async def send_text_message(
         raise HTTPException(status_code=503, detail="Agent unreachable")
 
 
-class UpdatePhoneRequest(BaseModel):
-    label: Optional[str] = Field(None, description="Display label of the phone.")
-    color: Optional[str] = Field(None, description="Display color of the phone.")
-    lang: Optional[str] = Field(None, description="Language code of the phone.")
-
-
-@router.patch("/{phone_id}", summary="Update phone", description="Updates label, color or lang on a phone owned by the current user. No other field can be changed.")
+@router.patch("/{phone_id}", response_model=PhoneResponse, summary="Update phone", description="Updates label, color or lang on a phone owned by the current user. No other field can be changed.")
 def update_phone(
     phone_id: str,
     body: UpdatePhoneRequest,
@@ -545,7 +653,7 @@ def update_phone(
     return result.data[0]
 
 
-@router.delete("/{phone_id}", summary="Delete phone", description="Deletes a phone owned by the current user.")
+@router.delete("/{phone_id}", response_model=OkResponse, summary="Delete phone", description="Deletes a phone owned by the current user.")
 def delete_phone(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
     result = (
         db.table("phones")
@@ -559,13 +667,13 @@ def delete_phone(phone_id: str, user=Depends(get_current_user), db: Client = Dep
     return {"ok": True}
 
 
-@internal_route(router.patch("/{phone_id}/docker-status", summary="Update docker status", description="Internal. Stores docker_status and docker_url reported for the phone. Body: { status, url }."))
+@internal_route(router.patch("/{phone_id}/docker-status", response_model=DockerStatusResponse, summary="Update docker status", description="Internal. Stores docker_status and docker_url reported for the phone. Body: { status, url }."))
 def update_docker_status(phone_id: str, body: dict, db: Client = Depends(get_supabase)):
     result = db.table("phones").update({
         "docker_status": body["status"],
         "docker_url":    body.get("url"),
     }).eq("id", phone_id).execute()
-    return result.data[0] if result.data else {}
+    return result.data[0] if result.data else DockerStatusResponse()
 
 
 async def _dry_run_template(host: dict, phone_id: str, spec: dict) -> dict:
@@ -594,6 +702,7 @@ async def _dry_run_template(host: dict, phone_id: str, spec: dict) -> dict:
 
 @internal_route(router.post(
     "/{phone_id}/templates/test",
+    response_model=SeedTemplatesTestResponse,
     summary="Dry-run the seed templates",
     description="Internal. Validates every seed template against the agent without writing anything. Run this before provision.",
 ))
@@ -680,6 +789,7 @@ async def _create_one_seed(db: Client, phone_id: str, host: dict, name: str) -> 
 
 @internal_route(router.post(
     "/{phone_id}/templates/check-contact",
+    response_model=CreateSeedResponse,
     summary="Create check_contact",
     description="Internal. Creates the check_contact template through the agent if it does not exist yet.",
 ))

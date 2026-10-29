@@ -15,15 +15,16 @@ next_run מחושב בכל create/update/run.
 """
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from supabase import Client
 
 from dependencies import get_supabase
 from services.scheduler import compute_next_run
+from routers.common_schemas import OkResponse, Passthrough
 
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
@@ -78,6 +79,70 @@ class ScheduleUpdate(BaseModel):
     status: Optional[str] = Field(None, description="active or paused. firing, completed and error are set by the Scheduler.")
     run_at: Optional[str] = Field(None, description="Run time for once schedules (ISO 8601).")
     cron_expr: Optional[str] = Field(None, description="Linux cron expression for cron schedules, for example '30 20 * * 0,3'.")
+
+
+# ── Response Schemas ───────────────────────────────────────────────────────
+
+class ScheduleScenarioRef(BaseModel):
+    name: Optional[str] = Field(None, description="Scenario name.")
+
+
+class ScheduleResponse(BaseModel):
+    """Same columns as SCHEDULE_COLUMNS. Anything else in the row is dropped."""
+    id: str = Field(..., description="Schedule id.")
+    user_id: Optional[str] = Field(None, description="Owner.")
+    phone_id: Optional[str] = Field(None, description="Phone that runs the scenario.")
+    contact_id: Optional[str] = Field(None, description="Taken from the scenario.")
+    scenario_id: Optional[str] = Field(None, description="Scenario to run.")
+    schedule_name: Optional[str] = Field(None, description="Display name.")
+    schedule_type: Optional[str] = Field(None, description="once or cron.")
+    cron_expr: Optional[str] = Field(None, description="Linux cron expression, for cron schedules.")
+    run_at: Optional[str] = Field(None, description="Run time, for once schedules.")
+    next_run: Optional[str] = Field(None, description="Next time the Scheduler fires it.")
+    last_run: Optional[str] = Field(None, description="Last time it fired.")
+    status: Optional[str] = Field(None, description="active, paused, firing, completed or error.")
+    created_at: Optional[str] = Field(None, description="ISO 8601 timestamp, as stored.")
+    updated_at: Optional[str] = Field(None, description="ISO 8601 timestamp, as stored.")
+    scenarios: Optional[ScheduleScenarioRef] = Field(None, description="Scenario name; present on reads, not on create.")
+
+
+class ScheduleListItem(ScheduleResponse):
+    """schedules_list / rpc_schedules_list / schedule_get row. Other RPC keys are kept."""
+    model_config = ConfigDict(extra="allow")
+
+    last_call_status: Optional[str] = Field(None, description="Status of the latest call it fired.")
+    running: Optional[bool] = Field(None, description="True while a fired call is running.")
+
+
+class SchedulesPageResponse(Passthrough):
+    schedules: list[ScheduleListItem] = Field(..., description="Schedules on this page.")
+    total: int = Field(..., description="Total matching schedules.")
+    page: int = Field(..., description="Current page, starting at 1.")
+    page_size: int = Field(..., description="Rows per page.")
+
+
+class ScheduleCallItem(Passthrough):
+    """spine_schedule_calls_paged row."""
+
+
+class ScheduleCallsResponse(BaseModel):
+    calls: list[ScheduleCallItem] = Field(..., description="Calls on this page.")
+    total: int = Field(..., description="Total calls fired by the schedule.")
+    page: int = Field(..., description="Current page, starting at 1.")
+    page_size: int = Field(..., description="Rows per page.")
+
+
+class CallEventItem(Passthrough):
+    """spine_call_events row."""
+
+
+class CallEventsResponse(BaseModel):
+    events: list[CallEventItem] = Field(..., description="Spine events of the call.")
+
+
+class ScheduleRunResponse(ScheduleResponse):
+    queued: bool = Field(True, description="Always true: the schedule fires on the next Scheduler tick.")
+    message: str = Field(..., description="Human-readable result.")
 
 
 # ── Validation helpers ─────────────────────────────────────────────────────
@@ -168,8 +233,8 @@ def _resolve_scenario(
 
 # ── List ───────────────────────────────────────────────────────────────────
 
-@router.get("", summary="List schedules", description="Legacy flat list with scenario name, last call status and running flag. The grid uses /schedules/paged.")
-@router.get("/", summary="List schedules", description="Legacy flat list with scenario name, last call status and running flag. The grid uses /schedules/paged.")
+@router.get("", response_model=list[ScheduleListItem], summary="List schedules", description="Legacy flat list with scenario name, last call status and running flag. The grid uses /schedules/paged.")
+@router.get("/", response_model=list[ScheduleListItem], summary="List schedules", description="Legacy flat list with scenario name, last call status and running flag. The grid uses /schedules/paged.")
 def list_schedules(
     phone_id: Optional[str] = Query(None, description="Filter by phone."),
     status: Optional[str] = Query(None, description="Filter by status."),
@@ -192,7 +257,7 @@ def list_schedules(
 
 
 # ⚠️ חייב להופיע לפני GET /{schedule_id}, אחרת "paged" ייתפס כ-schedule_id
-@router.get("/paged", summary="List schedules (paged)", description="Returns { schedules, total, page, page_size }. Page size comes from bot_config 'schedules_page_size'.")
+@router.get("/paged", response_model=SchedulesPageResponse, summary="List schedules (paged)", description="Returns { schedules, total, page, page_size }. Page size comes from bot_config 'schedules_page_size'.")
 def list_schedules_paged(
     phone_id: Optional[str] = Query(None, description="Filter by phone."),
     status: Optional[str] = Query(None, description="Filter by status."),
@@ -225,7 +290,7 @@ def list_schedules_paged(
 
 # ── Calls (לוג אירועים) — מדורג ────────────────────────────────────────────
 
-@router.get("/{schedule_id}/calls", summary="List schedule calls", description="Returns the calls fired by the schedule, paged. Page size comes from bot_config 'schedule_log_page_size'.")
+@router.get("/{schedule_id}/calls", response_model=ScheduleCallsResponse, summary="List schedule calls", description="Returns the calls fired by the schedule, paged. Page size comes from bot_config 'schedule_log_page_size'.")
 def schedule_calls(
     schedule_id: str,
     page: int = Query(1, ge=1, description="Page number, starting at 1."),
@@ -253,7 +318,7 @@ def schedule_calls(
 # ── Drill-down: אירועי Spine לשיחה ─────────────────────────────────────────
 # חייב להיות מוגדר לפני GET /{schedule_id} — אחרת "calls" נתפס כ-id.
 
-@router.get("/calls/{call_id}/events", summary="List call events", description="Returns the Spine events of a call, for drill-down.")
+@router.get("/calls/{call_id}/events", response_model=CallEventsResponse, summary="List call events", description="Returns the Spine events of a call, for drill-down.")
 def call_events(
     call_id: str,
     db: Client = Depends(get_supabase),
@@ -268,7 +333,7 @@ def call_events(
 
 # ── Get one ────────────────────────────────────────────────────────────────
 
-@router.get("/{schedule_id}", summary="Get schedule", description="Returns one schedule in the same shape as the list.")
+@router.get("/{schedule_id}", response_model=ScheduleListItem, summary="Get schedule", description="Returns one schedule in the same shape as the list.")
 def get_schedule(
     schedule_id: str,
     db: Client = Depends(get_supabase),
@@ -287,8 +352,8 @@ def get_schedule(
 
 # ── Create ─────────────────────────────────────────────────────────────────
 
-@router.post("", status_code=201, summary="Create schedule", description="Creates a schedule and computes next_run. contact_id is taken from the scenario, which must belong to the phone.")
-@router.post("/", status_code=201, summary="Create schedule", description="Creates a schedule and computes next_run. contact_id is taken from the scenario, which must belong to the phone.")
+@router.post("", status_code=201, response_model=ScheduleResponse, summary="Create schedule", description="Creates a schedule and computes next_run. contact_id is taken from the scenario, which must belong to the phone.")
+@router.post("/", status_code=201, response_model=ScheduleResponse, summary="Create schedule", description="Creates a schedule and computes next_run. contact_id is taken from the scenario, which must belong to the phone.")
 def create_schedule(
     body: ScheduleCreate,
     db: Client = Depends(get_supabase),
@@ -344,7 +409,7 @@ def create_schedule(
 
 # ── Update ─────────────────────────────────────────────────────────────────
 
-@router.put("/{schedule_id}", summary="Update schedule", description="Updates a schedule. next_run is recomputed only when the timing really changes; contact_id follows the scenario.")
+@router.put("/{schedule_id}", response_model=Optional[ScheduleResponse], summary="Update schedule", description="Updates a schedule. next_run is recomputed only when the timing really changes; contact_id follows the scenario.")
 def update_schedule(
     schedule_id: str,
     body: ScheduleUpdate,
@@ -447,7 +512,7 @@ def update_schedule(
 
 # ── Delete ─────────────────────────────────────────────────────────────────
 
-@router.delete("/{schedule_id}", summary="Delete schedule", description="Deletes the schedule.")
+@router.delete("/{schedule_id}", response_model=OkResponse, summary="Delete schedule", description="Deletes the schedule.")
 def delete_schedule(
     schedule_id: str,
     db: Client = Depends(get_supabase),
@@ -467,7 +532,7 @@ def delete_schedule(
 
 # ── Run now ────────────────────────────────────────────────────────────────
 
-@router.post("/{schedule_id}/run", summary="Run schedule now", description="Queues the schedule by setting next_run=now and status=active; the Scheduler fires it on its next tick. Returns 409 while the schedule is firing.")
+@router.post("/{schedule_id}/run", response_model=ScheduleRunResponse, summary="Run schedule now", description="Queues the schedule by setting next_run=now and status=active; the Scheduler fires it on its next tick. Returns 409 while the schedule is firing.")
 def run_schedule_now(
     schedule_id: str,
     db: Client = Depends(get_supabase),

@@ -418,34 +418,34 @@ def _is_exists_error(e: Exception) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class SignupIn(BaseModel):
-    email: EmailStr
-    password: str = Field(..., min_length=6)
-    metadata: dict = Field(default_factory=dict)
-    lang: str = "he"
+    email: EmailStr = Field(..., description="Email address to register.")
+    password: str = Field(..., min_length=6, description="Password, at least 6 characters.")
+    metadata: dict = Field(default_factory=dict, description="User metadata stored on the Supabase user; full_name is copied to users.name.")
+    lang: str = Field("he", description="Email language: he, en, ru or ar.")
 
 
 class ForgotPasswordIn(BaseModel):
-    email: EmailStr
-    redirectTo: Optional[str] = None
-    lang: str = "he"
+    email: EmailStr = Field(..., description="Email address of the account.")
+    redirectTo: Optional[str] = Field(None, description="Page the reset link opens. Only allowed origins are used; otherwise /reset-password.")
+    lang: str = Field("he", description="Email language when the user has none stored.")
 
 
 class MagicLinkIn(BaseModel):
-    email: EmailStr
-    lang: str = "he"
+    email: EmailStr = Field(..., description="Email address to sign in with.")
+    lang: str = Field("he", description="Email language when the user has none stored.")
 
 
 class EmailResult(BaseModel):
-    success: bool = True
-    message: str
-    user: Optional[dict] = None
+    success: bool = Field(True, description="True when the email was sent (or, for reset, when the request was accepted).")
+    message: str = Field(..., description="Human-readable result in the user's language.")
+    user: Optional[dict] = Field(None, description="Created user { id, email }; signup only.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Endpoints
 # ══════════════════════════════════════════════════════════════════════════════
 
-@router.post("/signup", response_model=EmailResult, summary="Sign up — verification email via Resend")
+@router.post("/signup", response_model=EmailResult, summary="Sign up — verification email via Resend", description="Creates an unconfirmed user and sends the verification email through Resend in the requested language. Returns 400 when the email is already registered.")
 async def signup(body: SignupIn):
     lang = _lang(body.lang)
     t = _t(SIGNUP_T, lang)
@@ -496,7 +496,7 @@ async def signup(body: SignupIn):
     )
 
 
-@router.post("/forgot-password", response_model=EmailResult, summary="Password reset email via Resend")
+@router.post("/forgot-password", response_model=EmailResult, summary="Password reset email via Resend", description="Sends a password reset email through Resend. Unknown emails get the same success reply, so the endpoint does not reveal which emails exist.")
 async def forgot_password(body: ForgotPasswordIn):
     lang = _lang(body.lang)
     t = _t(RESET_T, lang)
@@ -528,7 +528,7 @@ async def forgot_password(body: ForgotPasswordIn):
     return EmailResult(message=t["success"])
 
 
-@router.post("/magic-link", response_model=EmailResult, summary="Magic link email via Resend")
+@router.post("/magic-link", response_model=EmailResult, summary="Magic link email via Resend", description="Sends a sign-in link through Resend. A new email gets a welcome email; an existing user gets a login email in their stored language.")
 async def magic_link(body: MagicLinkIn):
     db = _db()
 

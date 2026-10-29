@@ -10,6 +10,7 @@ import uuid
 from routers.template_manager import validate_scenario_templates
 from routers.compile_check import _post_worker_sync  # ⬅️ אותו DEV_WORKER_URL של compile-check, בלי event loop
 from services.trusted_domains import check_script_urls, user_trusted_set, base_domains
+from routers.common_schemas import OkResponse
 
 router = APIRouter(prefix="/phones/{phone_id}/scenarios", tags=["scenarios"])
 
@@ -69,6 +70,48 @@ class ScenarioUpdate(BaseModel):
     bot_contact: Optional[dict[str, Any]] = Field(None, description="Bot contact details, stored in config.bot_contact.")
     event_type: Optional[Literal["trigger", "scheduler"]] = Field(None, description="trigger (starts on an incoming message) or scheduler (started by a schedule).")
     priority: Optional[int] = Field(None, description="Match priority when several scenarios match; default 15.")
+
+
+# ── Response Schemas ───────────────────────────────────────────────────────
+
+class ScenarioContactRef(BaseModel):
+    id: Optional[str] = Field(None, description="Contact id.")
+    name: Optional[str] = Field(None, description="Contact name.")
+    number: Optional[str] = Field(None, description="Phone number.")
+    avatar: Optional[str] = Field(None, description="Avatar URL.")
+    is_bot: Optional[bool] = Field(None, description="True when the contact is a bot.")
+
+
+class ScenarioResponse(BaseModel):
+    """A scenarios row (_SELECT columns) with the config fields expanded by _expand_config."""
+    id: str = Field(..., description="Scenario id.")
+    phone_id: Optional[str] = Field(None, description="Phone id.")
+    contact_id: Optional[str] = Field(None, description="Contact the scenario is bound to.")
+    name: Optional[str] = Field(None, description="Scenario name.")
+    status: Optional[str] = Field(None, description="draft or active.")
+    config: Optional[dict[str, Any]] = Field(None, description="Raw stored config.")
+    event_type: Optional[str] = Field(None, description="trigger or scheduler.")
+    priority: int = Field(15, description="Match priority; default 15.")
+    created_at: Optional[str] = Field(None, description="ISO 8601 timestamp, as stored.")
+    estimated_duration_minutes: Optional[str | int | float] = Field(None, description="Estimated run time in minutes.")
+    inter_leaf_response_time: Optional[str | int | float] = Field(None, description="Response time between leaves.")
+    contacts: Optional[ScenarioContactRef] = Field(None, description="Present on GET; not on create/update/publish.")
+    # expanded from config
+    canvas: list[Any] = Field([], description="Designer components (config.canvas).")
+    arrow_data: Any = Field(None, description="Connections between components (config.arrow_data).")
+    interval: Any = Field(None, description="Delay between steps, for example { mins, secs }.")
+    estimated_time: Any = Field(None, description="Estimated time object.")
+    use_auto_calc: Optional[bool] = Field(True, description="Calculate the estimated time automatically.")
+    description: Optional[str] = Field("", description="Scenario description.")
+    bot_contact: Optional[dict[str, Any]] = Field(None, description="Bot contact details.")
+
+
+class ScenariosPageResponse(BaseModel):
+    items: list[ScenarioResponse] = Field(..., description="Scenarios on this page, newest first.")
+    total: int = Field(..., description="Total scenarios of the phone.")
+    page: int = Field(..., description="Current page, starting at 1.")
+    page_size: int = Field(..., description="Rows per page.")
+    total_pages: int = Field(..., description="Number of pages.")
 
 
 def _merge_config(existing_config: dict, body) -> dict:
@@ -240,7 +283,7 @@ def _run_publish_checks(row: dict, db: Client, phone_id: str) -> list[dict]:
 
 # ── List scenarios ─────────────────────────────────────────────────────────
 # ── List scenarios (paginated) ─────────────────────────────────────────────
-@router.get("/", summary="List scenarios", description="Returns the phone's scenarios, newest first. Page size comes from bot_config 'scenarios.paging'.")
+@router.get("/", response_model=ScenariosPageResponse, summary="List scenarios", description="Returns the phone's scenarios, newest first. Page size comes from bot_config 'scenarios.paging'.")
 def list_scenarios(
     phone_id: str,
     page: int = Query(1, description="Page number, starting at 1."),
@@ -270,7 +313,7 @@ def list_scenarios(
     }
 
 # ── List by event_type ─────────────────────────────────────────────────────
-@router.get("/by-type/{event_type}", summary="List active scenarios by type", description="Returns the phone's active scenarios of the given event_type (trigger or scheduler), newest first.")
+@router.get("/by-type/{event_type}", response_model=list[ScenarioResponse], summary="List active scenarios by type", description="Returns the phone's active scenarios of the given event_type (trigger or scheduler), newest first.")
 def list_scenarios_by_type(
     phone_id: str,
     event_type: Literal["trigger", "scheduler"],
@@ -289,7 +332,7 @@ def list_scenarios_by_type(
 
 
 # ── Get one ────────────────────────────────────────────────────────────────
-@router.get("/{scenario_id}", summary="Get scenario", description="Returns one scenario of the phone with its config fields expanded.")
+@router.get("/{scenario_id}", response_model=ScenarioResponse, summary="Get scenario", description="Returns one scenario of the phone with its config fields expanded.")
 def get_scenario(
     phone_id: str, scenario_id: str, db: Client = Depends(get_supabase)
 ):
@@ -307,7 +350,7 @@ def get_scenario(
 
 
 # ── Create ─────────────────────────────────────────────────────────────────
-@router.post("/", summary="Create scenario", description="Creates a scenario (draft by default). Designer fields are stored inside config.")
+@router.post("/", response_model=ScenarioResponse, summary="Create scenario", description="Creates a scenario (draft by default). Designer fields are stored inside config.")
 def create_scenario(
     phone_id: str, body: ScenarioCreate, db: Client = Depends(get_supabase)
 ):
@@ -333,7 +376,7 @@ def create_scenario(
 
 
 # ── Update ─────────────────────────────────────────────────────────────────
-@router.put("/{scenario_id}", summary="Update scenario", description="Updates a scenario. Designer fields are merged into the existing config; only the fields that are sent change.")
+@router.put("/{scenario_id}", response_model=ScenarioResponse, summary="Update scenario", description="Updates a scenario. Designer fields are merged into the existing config; only the fields that are sent change.")
 def update_scenario(
     phone_id: str, scenario_id: str, body: ScenarioUpdate,
     db: Client = Depends(get_supabase)
@@ -375,7 +418,7 @@ def update_scenario(
 
 
 # ── Publish ────────────────────────────────────────────────────────────────
-@router.post("/{scenario_id}/publish", summary="Publish scenario", description="Validates components, scheduler templates, trusted domains in script URLs and Deno code, compiles on the Worker, then sets status to active. Returns 422 with issues when a check fails.")
+@router.post("/{scenario_id}/publish", response_model=ScenarioResponse, summary="Publish scenario", description="Validates components, scheduler templates, trusted domains in script URLs and Deno code, compiles on the Worker, then sets status to active. Returns 422 with issues when a check fails.")
 def publish_scenario(
     phone_id: str, scenario_id: str, db: Client = Depends(get_supabase)
 ):
@@ -413,6 +456,7 @@ def publish_scenario(
 # אם המחיקה נכשלת על FK אחר — Postgres מבטל את כל ההצהרה, כולל הניקוי.
 @router.delete(
     "/{scenario_id}",
+    response_model=OkResponse,
     summary="Delete scenario",
     description=(
         "Deletes the scenario. A database trigger first removes everything the executions module "

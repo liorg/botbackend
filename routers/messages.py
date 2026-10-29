@@ -5,11 +5,60 @@ from supabase import Client
 import json, re, os, io
 import httpx
 from datetime import datetime
+from typing import Any, Optional
+from pydantic import BaseModel, ConfigDict, Field
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 
 # ── Config ────────────────────────────────────────────────────────────
 BACKEND_URL = os.getenv("BACKEND_URL", "https://vid.michal-solutions.com/api")
+
+# ── Response Schemas ──────────────────────────────────────────────────
+class ChatButton(BaseModel):
+    label: Optional[str] = Field("", description="Button text.")
+
+
+class ChatMenuOption(BaseModel):
+    title: Optional[str] = Field("", description="Row title.")
+    subtitle: Optional[str] = Field(None, description="Row description.")
+    rowId: Optional[str] = Field(None, description="Row id sent back when selected.")
+
+
+class ChatMessage(BaseModel):
+    """Message formatted for the chat view (output of format_message)."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(..., description="Message id.")
+    contact_id: Optional[str] = Field(None, description="Contact id.")
+    from_: str = Field(..., alias="from", description="bot or user.")
+    sender: Optional[str] = Field(None, description="Sender number or LID.")
+    type: str = Field(..., description="text, menu, image, audio, file, buttons or button_reply.")
+    text: str = Field("", description="Text, body, caption or description of the message.")
+    timestamp: str = Field("", description="sent_at as stored.")
+    date: str = Field("", description="dd/mm/yyyy.")
+    buttons: Optional[list[ChatButton]] = Field(None, description="Buttons, for type buttons.")
+    options: Optional[list[ChatMenuOption]] = Field(None, description="Menu rows, for type menu.")
+    menuButtonLabel: Optional[str] = Field(None, description="Menu button text, for type menu.")
+    menuTitle: Optional[str] = Field(None, description="Menu title, for type menu.")
+    imageUrl: Optional[str] = Field(None, description="Proxied media URL, for type image.")
+    audioUrl: Optional[str] = Field(None, description="Proxied media URL, for type audio.")
+    fileName: Optional[str] = Field(None, description="File name, for type file.")
+
+
+class LastMessage(BaseModel):
+    id: str = Field(..., description="Message id.")
+    contact_id: Optional[str] = Field(None, description="Contact id.")
+    content: Any = Field(None, description="Message content as stored.")
+    direction: Optional[bool] = Field(None, description="True = incoming, false = outgoing.")
+    sent_at: Optional[str] = Field(None, description="ISO 8601 timestamp, as stored.")
+    sender: Optional[str] = Field(None, description="Sender number or LID.")
+
+
+class MessagesPageResponse(BaseModel):
+    messages: list[ChatMessage] = Field(..., description="Messages on this page, oldest first, formatted for the chat view.")
+    has_more: bool = Field(..., description="True when older messages exist.")
+    next_cursor: Any = Field(None, description="Pass back as before_sent_at / before_id. Null on the first page end.")
+
 
 # ── Helpers ───────────────────────────────────────────────────────────
 def build_media_url(media_url: str, phone_id: str) -> str | None:
@@ -124,7 +173,7 @@ def format_message(msg, phone_number: str = "", phone_id: str = ""):
 
 # ── Endpoints ─────────────────────────────────────────────────────────
 
-@router.get("/contact/{contact_id}", summary="List contact messages", description="Returns up to limit messages of the contact, oldest first, formatted for the chat view.")
+@router.get("/contact/{contact_id}", response_model=list[ChatMessage], summary="List contact messages", description="Returns up to limit messages of the contact, oldest first, formatted for the chat view.")
 def get_contact_messages(
     contact_id: str,
     limit: int = Query(200, le=500, description="Maximum number of messages to return."),
@@ -142,7 +191,7 @@ def get_contact_messages(
     return [format_message(m, phone_number) for m in (result.data or [])]
 
 
-@router.get("/phone/{phone_id}/contact/{contact_id}", summary="List chat messages", description="Returns up to limit formatted messages between the phone and the contact, oldest first. Falls back to the contact's messages that have no phone_id.")
+@router.get("/phone/{phone_id}/contact/{contact_id}", response_model=list[ChatMessage], summary="List chat messages", description="Returns up to limit formatted messages between the phone and the contact, oldest first. Falls back to the contact's messages that have no phone_id.")
 def get_messages_by_phone_and_contact(
     phone_id: str,
     contact_id: str,
@@ -178,7 +227,7 @@ def get_messages_by_phone_and_contact(
     return [format_message(m, phone_number, phone_id) for m in msgs]
 
 
-@router.get("/phone/{phone_id}", summary="List phone messages", description="Returns up to limit formatted messages of the phone, newest first.")
+@router.get("/phone/{phone_id}", response_model=list[ChatMessage], summary="List phone messages", description="Returns up to limit formatted messages of the phone, newest first.")
 def get_all_phone_messages(
     phone_id: str,
     limit: int = Query(500, le=1000, description="Maximum number of messages to return."),
@@ -248,7 +297,7 @@ async def proxy_media(
     except Exception as e:
         raise HTTPException(503, f"Agent unavailable: {e}")
 
-@router.get("/phone/{phone_id}/last", summary="Last message per contact", description="Returns the last message of every contact of the phone in one call, as an object keyed by contact_id.")
+@router.get("/phone/{phone_id}/last", response_model=dict[str, LastMessage], summary="Last message per contact", description="Returns the last message of every contact of the phone in one call, as an object keyed by contact_id.")
 def get_last_messages_for_phone(
     phone_id: str,
     db: Client = Depends(get_supabase),
@@ -291,7 +340,7 @@ def get_last_messages_for_phone(
 # לא מוחק / לא משנה שום endpoint קיים
 # ══════════════════════════════════════════════════════════════════════
 
-@router.get("/phone/{phone_id}/contact/{contact_id}/page", summary="Get chat messages page", description="Keyset paging for a chat. No cursor returns the newest page; before_sent_at + before_id return an older page; after_sent_at returns only newer messages for polling. Returns { messages, has_more, next_cursor }.")
+@router.get("/phone/{phone_id}/contact/{contact_id}/page", response_model=MessagesPageResponse, summary="Get chat messages page", description="Keyset paging for a chat. No cursor returns the newest page; before_sent_at + before_id return an older page; after_sent_at returns only newer messages for polling. Returns { messages, has_more, next_cursor }.")
 def get_messages_page(
     phone_id: str,
     contact_id: str,

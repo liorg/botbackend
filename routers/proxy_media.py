@@ -30,7 +30,7 @@ async def _get_agent_api_port(db: Client, phone_id: str):
     except Exception:
         return None, None
 
-@router.get("/media/{phone_id}/{message_id}")
+@router.get("/media/{phone_id}/{message_id}", summary="Get message media", description="Streams the media of a message from the agent, keeping the agent address hidden.")
 async def proxy_media(
     phone_id: str,
     message_id: str,

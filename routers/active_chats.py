@@ -7,14 +7,51 @@ main.py:
 """
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field
 from supabase import Client
 
 from dependencies import get_supabase
+from routers.common_schemas import Passthrough
 
 router = APIRouter(prefix="/active-chats", tags=["active-chats"])
 
 
-@router.get("/{phone_id}/contacts")
+# ── Response Schemas ───────────────────────────────────────────────────────
+# Row shapes come from the RPCs; every field they return is kept.
+
+class ActiveContactItem(Passthrough):
+    """get_active_contacts row: contact + last call + last message + counts."""
+
+
+class ActiveMessageItem(Passthrough):
+    """get_contact_messages / get_call_messages row."""
+
+
+class ActiveCallItem(Passthrough):
+    """get_contact_calls row."""
+
+
+class CallLeafItem(Passthrough):
+    """get_call_leaves row: leaf + message_ids."""
+
+
+class ActiveContactsResponse(BaseModel):
+    contacts: list[ActiveContactItem] = Field(..., description="Active contacts of the phone, each with last call, last message and counts.")
+
+
+class ActiveMessagesResponse(BaseModel):
+    messages: list[ActiveMessageItem] = Field(..., description="WhatsApp messages, as returned by the RPC.")
+
+
+class ActiveCallsResponse(BaseModel):
+    calls: list[ActiveCallItem] = Field(..., description="Calls of the contact, as returned by the RPC.")
+
+
+class CallLeavesResponse(BaseModel):
+    leaves: list[CallLeafItem] = Field(..., description="Leaves of the call with their message ids.")
+
+
+@router.get("/{phone_id}/contacts", response_model=ActiveContactsResponse, summary="List active contacts", description="Returns the phone's active contacts with their last call, last message and counts, in one RPC call.")
 def get_active_contacts(
     phone_id: str,
     db: Client = Depends(get_supabase),
@@ -24,7 +61,7 @@ def get_active_contacts(
     return {"contacts": res.data or []}
 
 
-@router.get("/{phone_id}/contacts/{contact_id}/messages")
+@router.get("/{phone_id}/contacts/{contact_id}/messages", response_model=ActiveMessagesResponse, summary="List contact messages", description="Returns the contact's WhatsApp messages on the phone, paged with limit/offset, in one RPC call.")
 def get_contact_messages(
     phone_id: str,
     contact_id: str,
@@ -42,7 +79,7 @@ def get_contact_messages(
     return {"messages": res.data or []}
 
 
-@router.get("/{phone_id}/contacts/{contact_id}/calls")
+@router.get("/{phone_id}/contacts/{contact_id}/calls", response_model=ActiveCallsResponse, summary="List contact calls", description="Returns the contact's calls on the phone, up to limit, in one RPC call.")
 def get_contact_calls(
     phone_id: str,
     contact_id: str,
@@ -58,7 +95,7 @@ def get_contact_calls(
     return {"calls": res.data or []}
 
 
-@router.get("/calls/{call_id}/messages")
+@router.get("/calls/{call_id}/messages", response_model=ActiveMessagesResponse, summary="List call messages", description="Returns the messages of one call, in one RPC call.")
 def get_call_messages(
     call_id: str,
     db: Client = Depends(get_supabase),
@@ -68,7 +105,7 @@ def get_call_messages(
     return {"messages": res.data or []}
 
 
-@router.get("/calls/{call_id}/leaves")
+@router.get("/calls/{call_id}/leaves", response_model=CallLeavesResponse, summary="List call leaves", description="Returns the leaves of one call with their message ids, in one RPC call.")
 def get_call_leaves(
     call_id: str,
     db: Client = Depends(get_supabase),

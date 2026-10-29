@@ -2,13 +2,15 @@
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from supabase import Client
 
 from dependencies import get_current_user, get_supabase
+from routers.common_schemas import Passthrough
+from routers.messages import ChatMessage
 
 router = APIRouter(prefix="/calls", tags=["calls"])
 logger = logging.getLogger(__name__)
@@ -28,21 +30,76 @@ TERMINAL_STATUSES = {
 
 
 class StartCallRequest(BaseModel):
-    phone_id: str
-    contact_id: str
-    scenario_id: str | None = None
-    duration_seconds: int = Field(default=300, ge=1, le=86_400)
+    phone_id: str = Field(..., description="Phone id.")
+    contact_id: str = Field(..., description="Contact id.")
+    scenario_id: str | None = Field(None, description="Scenario to link to the call, optional.")
+    duration_seconds: int = Field(default=300, ge=1, le=86_400, description="Recording length in seconds (1-86400). Sets expected_end.")
 
 
 class EndCallRequest(BaseModel):
-    call_id: str
+    call_id: str = Field(..., description="Recording call to end.")
     status: Literal[
         "completed",
         "failed",
         "aborted",
         "expired",
         "timeout",
-    ] = "completed"
+    ] = Field("completed", description="Final status: completed, failed, aborted, expired or timeout.")
+
+
+# ── Response Schemas ──────────────────────────────────────────────────────
+
+class RecordingCall(BaseModel):
+    id: str = Field(..., description="Call id.")
+    phone_id: Optional[str] = Field(None, description="Phone id.")
+    contact_id: Optional[str] = Field(None, description="Contact id.")
+    scenario_id: Optional[str] = Field(None, description="Scenario id.")
+    status: Optional[str] = Field(None, description="Call status; active while recording.")
+    call_type: Optional[str] = Field(None, description="Always recording here.")
+    started_at: Optional[str] = Field(None, description="ISO 8601 timestamp, as stored.")
+    expected_end: Optional[str] = Field(None, description="When the recording ends automatically. ISO 8601 timestamp, as stored.")
+
+
+class StartCallResponse(BaseModel):
+    call_id: str = Field(..., description="Call id.")
+    call_type: str = Field(..., description="Always recording.")
+    status: str = Field(..., description="Call status; active while recording.")
+    started_at: Optional[str] = Field(None, description="ISO 8601 timestamp, as stored.")
+    expected_end: Optional[str] = Field(None, description="When the recording ends automatically. ISO 8601 timestamp, as stored.")
+    phone_id: str = Field(..., description="Phone id.")
+    contact_id: str = Field(..., description="Contact id.")
+    already_running: bool = Field(..., description="True when an active recording already existed and was returned instead of a new one.")
+
+
+class ActiveCallResponse(BaseModel):
+    active: bool = Field(..., description="True when a recording call is active for the phone and contact.")
+    call: Optional[RecordingCall] = Field(None, description="The active recording call, or null.")
+
+
+class CallMessagesResponse(BaseModel):
+    call_id: str = Field(..., description="Call id.")
+    call_type: Optional[str] = Field(None, description="Always recording.")
+    call_status: Optional[str] = Field(None, description="Current call status.")
+    expected_end: Optional[str] = Field(None, description="ISO 8601 timestamp, as stored.")
+    ended_at: Optional[str] = Field(None, description="When the call ended; null while active.")
+    messages: list[ChatMessage] = Field(..., description="Messages of the call, oldest first, formatted for the chat view.")
+
+
+class EndCallResponse(BaseModel):
+    call_id: str = Field(..., description="Call id.")
+    status: Optional[str] = Field(None, description="Final call status.")
+    ended_at: Optional[str] = Field(None, description="ISO 8601 timestamp, as stored.")
+    already_ended: bool = Field(..., description="True when the call was not active, so nothing changed.")
+
+
+class CallRow(Passthrough):
+    """Full calls row (select("*")); every column is kept."""
+    id: str = Field(..., description="Call id.")
+    phone_id: Optional[str] = Field(None, description="Phone id.")
+    contact_id: Optional[str] = Field(None, description="Contact id.")
+    scenario_id: Optional[str] = Field(None, description="Scenario id.")
+    status: Optional[str] = Field(None, description="Call status.")
+    call_type: Optional[str] = Field(None, description="recording or a scenario call type.")
 
 
 def _get_running_recording_call(
@@ -68,7 +125,7 @@ def _get_running_recording_call(
     return result.data[0] if result.data else None
 
 
-@router.post("/start")
+@router.post("/start", response_model=StartCallResponse, summary="Start recording call", description="Starts a recording call for the phone and contact, ending after duration_seconds. If one is already active, returns it with already_running=true.")
 def start_call(
     body: StartCallRequest,
     user=Depends(get_current_user),
@@ -143,7 +200,7 @@ def start_call(
 
 # חשוב: חייב להיות לפני @router.get("/{call_id}") כדי ש-"active"
 # לא ייתפס כ-call_id.
-@router.get("/active/{phone_id}/{contact_id}")
+@router.get("/active/{phone_id}/{contact_id}", response_model=ActiveCallResponse, summary="Get active recording call", description="Returns the active recording call for the phone and contact, if any.")
 def get_active_call(
     phone_id: str,
     contact_id: str,
@@ -154,7 +211,7 @@ def get_active_call(
     return {"active": bool(call), "call": call}
 
 
-@router.get("/{call_id}/messages")
+@router.get("/{call_id}/messages", response_model=CallMessagesResponse, summary="Poll recording call messages", description="Returns the messages linked to the recording call, oldest first. Send since=<sent_at> to get only newer messages.")
 def poll_call_messages(
     call_id: str,
     since: str | None = Query(default=None),
@@ -225,7 +282,7 @@ def poll_call_messages(
     }
 
 
-@router.post("/end")
+@router.post("/end", response_model=EndCallResponse, summary="End recording call", description="Ends an active recording call with the given status. If it already ended, returns its current state with already_ended=true.")
 def end_call(
     body: EndCallRequest,
     user=Depends(get_current_user),
@@ -292,7 +349,7 @@ def end_call(
     }
 
 
-@router.get("/{call_id}")
+@router.get("/{call_id}", response_model=CallRow, summary="Get call", description="Returns the full calls row.")
 def get_call(
     call_id: str,
     user=Depends(get_current_user),

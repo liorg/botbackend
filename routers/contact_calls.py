@@ -2,11 +2,36 @@
 # רישום ב-main.py:  app.include_router(contact_calls.router)  (כמו שאר הראוטרים)
 # דורש את ה-RPC: get_call_flow (ראה get_call_flow.sql)
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import Field
 from dependencies import get_supabase
 from supabase import Client
-from typing import Optional
+from typing import Any, Optional
+
+from routers.common_schemas import Passthrough
 
 router = APIRouter(prefix="/contact_calls/{contact_id}", tags=["contact-calls"])
+
+# ── Response Schemas ───────────────────────────────────────────────────────
+# The shapes come from the RPCs (rpc_list_contact_calls / get_call_flow);
+# fields that are not declared are kept as-is.
+
+class ContactCallItem(Passthrough):
+    id: Optional[str] = Field(None, description="Call id.")
+    status: Optional[str] = Field(None, description="Call status.")
+
+
+class ContactCallsPage(Passthrough):
+    calls: list[ContactCallItem] = Field([], description="Calls on this page.")
+    page: int = Field(1, description="Current page, starting at 1.")
+    page_size: int = Field(0, description="Rows per page (from bot_config when not sent).")
+    total: int = Field(0, description="Total calls matching the filter.")
+    total_pages: int = Field(1, description="Number of pages.")
+    statuses: list[Any] = Field([], description="Statuses that exist for this contact, for the filter.")
+
+
+class CallFlowResponse(Passthrough):
+    call: dict[str, Any] = Field(..., description="The call with its flow, as returned by get_call_flow.")
+
 
 def _unwrap(data, fn_name: str):
     """PostgREST עוטף פונקציות jsonb ברשימה, ולעיתים גם במפתח בשם הפונקציה."""
@@ -26,8 +51,8 @@ _CALL_SELECT = (
 
 
 # ── רשימת שיחות של איש קשר (עם דפדוף — הכל בתוך ה-RPC) ────────────────────
-@router.get("")   # בלי סלאש בסוף
-@router.get("/")  # עם סלאש — שניהם עובדים, בלי תלות ב-redirect של ה-proxy
+@router.get("", response_model=ContactCallsPage, summary="List contact calls (paged)", description="Returns the contact's calls with paging and an optional status filter. Page size comes from bot_config when page_size is not sent.")   # בלי סלאש בסוף
+@router.get("/", response_model=ContactCallsPage, summary="List contact calls (paged)", description="Returns the contact's calls with paging and an optional status filter. Page size comes from bot_config when page_size is not sent.")  # עם סלאש — שניהם עובדים, בלי תלות ב-redirect של ה-proxy
 def list_contact_calls(
     contact_id: str,
     page: int = 1,
@@ -50,7 +75,7 @@ def list_contact_calls(
 
 
 # ── Flow של שיחה — RPC אחד ─────────────────────────────────────────────────
-@router.get("/{call_id}/flow")
+@router.get("/{call_id}/flow", response_model=CallFlowResponse, summary="Get call flow", description="Returns one call of the contact with its flow. Returns 404 when the call does not exist.")
 def get_call_flow(contact_id: str, call_id: str, db: Client = Depends(get_supabase)):
     result = db.rpc(
         "get_call_flow",

@@ -3,7 +3,7 @@ import os
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Any, Literal, Optional
 from datetime import datetime, timedelta, timezone
 
 from dependencies import get_supabase, get_current_user
@@ -13,6 +13,7 @@ from routers.contact_lang import (               # ⬅️ חדש
 )
 from supabase import Client
 from logging_config import get_logger
+from routers.common_schemas import ContactRow, MessageRow
 
 logger = get_logger("contacts")
 
@@ -54,6 +55,72 @@ class CheckPhoneResponse(BaseModel):
     contact_number: Optional[str] = Field(None, description="Number stored on the contact.")
     ping_step: Optional[str] = Field(None, description="Status of the latest open PING: pending or waiting_reply.")
     ping_sender_id: Optional[str] = Field(None, description="Id of that PING record.")
+
+
+class MessagesListResponse(BaseModel):
+    messages: list[MessageRow] = Field(..., description="Stored message rows, oldest first.")
+
+
+class ContactsListResponse(BaseModel):
+    contacts: list[ContactRow] = Field(..., description="Contacts, most recently updated first.")
+
+
+class DeleteContactResponse(BaseModel):
+    ok: bool = Field(True, description="Always true on success.")
+    deleted_messages: int = Field(..., description="Number of messages deleted with the contact.")
+
+
+class PingTemplateUsed(BaseModel):
+    id: str = Field(..., description="Template id.")
+    name: str = Field(..., description="Template name.")
+    lang: str = Field(..., description="Template language code.")
+    status: Optional[str] = Field(None, description="Template status.")
+    is_published: Optional[bool] = Field(None, description="Whether the template is published.")
+    params: dict[str, list[Any]] = Field(..., description="Values sent per part: { header, body }.")
+
+
+class PingSentResponse(BaseModel):
+    success: bool = Field(True, description="Always true on success.")
+    contact_id: str = Field(..., description="Contact the PING was sent for.")
+    ping_sender_id: Optional[str | int] = Field(None, description="ping_sender record id.")
+    whatsapp_message_id: Optional[str] = Field(None, description="WhatsApp id of the PING message.")
+    lang: str = Field(..., description="Language used for the PING.")
+    ping_text: str = Field(..., description="Text used when the PING went out as text.")
+    via: Literal["template", "text"] = Field(..., description="template or text.")
+    template: Optional[PingTemplateUsed] = Field(None, description="Null when the PING was sent as text.")
+    template_error: Optional[str] = Field(None, description="Why no template was used.")
+    message: str = Field(..., description="Human-readable result.")
+
+
+class PingConversationContact(BaseModel):
+    id: str = Field(..., description="Draft or PING contact id.")
+    name: Optional[str] = Field(None, description="WhatsApp name, name, LID or number.")
+    number: Optional[str] = Field(None, description="Number stored on the contact.")
+    lid: Optional[str] = Field(None, description="LID of the contact.")
+    tag: Optional[str] = Field(None, description="Contact tag.")
+    parent_contact_id: Optional[str] = Field(None, description="Contact to activate when this reply is selected.")
+
+
+class PingConversation(BaseModel):
+    contact: PingConversationContact = Field(..., description="Contact that sent the replies.")
+    messages: list[MessageRow] = Field(..., description="Incoming messages from the last 24 hours.")
+    last_message: MessageRow = Field(..., description="Most recent of those messages.")
+
+
+class PingConversationsResponse(BaseModel):
+    conversations: list[PingConversation] = Field(..., description="Candidate replies to the PING, one entry per contact.")
+
+
+class SelectResponseResult(BaseModel):
+    success: bool = Field(True, description="Always true on success.")
+    message: str = Field(..., description="Human-readable result.")
+    contact: ContactRow = Field(..., description="The contact that is now active with the selected LID.")
+
+
+class LinkDraftResponse(BaseModel):
+    ok: bool = Field(..., description="True when the draft was linked.")
+    reason: Optional[str] = Field(None, description="Set when ok is false.")
+    parent_contact_id: Optional[str] = Field(None, description="Contact the draft was linked to.")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -187,7 +254,7 @@ def check_phone(
 # CRUD
 # ══════════════════════════════════════════════════════════════════════
 
-@router.get("/calls/{call_id}/messages", summary="List call messages", description="Returns every message linked to the call, oldest first.")
+@router.get("/calls/{call_id}/messages", response_model=MessagesListResponse, summary="List call messages", description="Returns every message linked to the call, oldest first.")
 def get_call_messages(
     call_id: str,
     user=Depends(get_current_user),
@@ -206,7 +273,7 @@ def get_call_messages(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/contacts/{contact_id}/messages", summary="List contact messages (raw)", description="Returns every message of the contact, oldest first, as stored rows.")
+@router.get("/contacts/{contact_id}/messages", response_model=MessagesListResponse, summary="List contact messages (raw)", description="Returns every message of the contact, oldest first, as stored rows.")
 def get_contact_messages(
     contact_id: str,
     user=Depends(get_current_user),
@@ -226,7 +293,7 @@ def get_contact_messages(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/contacts", summary="List contacts", description="Returns the phone's contacts, most recently updated first.")
+@router.get("/contacts", response_model=ContactsListResponse, summary="List contacts", description="Returns the phone's contacts, most recently updated first.")
 def list_contacts(
     phone_id: str = Query(..., description="Phone whose contacts to list."),
     user=Depends(get_current_user),
@@ -249,7 +316,7 @@ def list_contacts(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/contacts", summary="Create contact", description="Creates a contact on the phone. Body: phone, name, email, tag (default 'new'), lid, lang. Without lang the phone owner's language is used.")
+@router.post("/contacts", response_model=Optional[ContactRow], summary="Create contact", description="Creates a contact on the phone. Body: phone, name, email, tag (default 'new'), lid, lang. Without lang the phone owner's language is used.")
 async def create_contact(
     body: dict,
     phone_id: str = Query(..., description="Phone to create the contact on."),
@@ -275,13 +342,13 @@ async def create_contact(
             "lang":     lang,                        # ⬅️
         }
         result = db.table("contacts").insert(contact_data).execute()
-        return result.data[0] if result.data else {}
+        return result.data[0] if result.data else None
     except Exception as e:
         logger.error(f"Error creating contact: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/contacts/{contact_id}", summary="Get contact", description="Returns a fresh copy of one contact from the database.")
+@router.get("/contacts/{contact_id}", response_model=ContactRow, summary="Get contact", description="Returns a fresh copy of one contact from the database.")
 def get_contact(
     contact_id: str,
     user=Depends(get_current_user),
@@ -310,7 +377,7 @@ def get_contact(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.patch("/contacts/{contact_id}", summary="Update contact", description="Updates name, email, tag, lid or lang. Only the fields that are sent change.")
+@router.patch("/contacts/{contact_id}", response_model=ContactRow, summary="Update contact", description="Updates name, email, tag, lid or lang. Only the fields that are sent change.")
 def update_contact(
     contact_id: str,
     body: UpdateContactRequest,
@@ -339,7 +406,7 @@ def update_contact(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/contacts/{contact_id}", summary="Delete contact", description="Deletes the contact together with its messages and PING records, and unlinks drafts that pointed to it. Returns the number of deleted messages.")
+@router.delete("/contacts/{contact_id}", response_model=DeleteContactResponse, summary="Delete contact", description="Deletes the contact together with its messages and PING records, and unlinks drafts that pointed to it. Returns the number of deleted messages.")
 def delete_contact(
     contact_id: str,
     user=Depends(get_current_user),
@@ -368,7 +435,7 @@ def delete_contact(
 # PING Flow - Step 1: שלח PING
 # ══════════════════════════════════════════════════════════════════════
 
-@router.post("/contacts/create-from-ping", summary="Send PING (step 1)", description="Creates, reuses or overrides the contact for a number, then sends a PING message in the contact's language through the agent. Unlinked drafts with the same number are linked to this contact.")
+@router.post("/contacts/create-from-ping", response_model=PingSentResponse, summary="Send PING (step 1)", description="Creates, reuses or overrides the contact for a number, then sends a PING message in the contact's language through the agent. Unlinked drafts with the same number are linked to this contact.")
 async def create_contact_from_ping(
     body: CreateContactFromPingRequest,
     user=Depends(get_current_user),
@@ -596,7 +663,7 @@ async def create_contact_from_ping(
 # PING Flow - Step 2: שלוף שיחות ממתינות
 # ══════════════════════════════════════════════════════════════════════
 
-@router.get("/contacts/outgoing-with-replies/{phone_id}", summary="List PING replies (step 2)", description="Returns draft contacts with a valid LID that have messages from the last 24 hours, with those messages, so the user can pick the reply that answers the PING.")
+@router.get("/contacts/outgoing-with-replies/{phone_id}", response_model=PingConversationsResponse, summary="List PING replies (step 2)", description="Returns draft contacts with a valid LID that have messages from the last 24 hours, with those messages, so the user can pick the reply that answers the PING.")
 def get_outgoing_with_replies(
     phone_id: str,
     user=Depends(get_current_user),
@@ -743,7 +810,7 @@ def get_outgoing_with_replies(
 # PING Flow - Step 3: בחירת תגובה וקישור LID
 # ══════════════════════════════════════════════════════════════════════
 
-@router.post("/contacts/select-response", summary="Select PING reply (step 3)", description="Takes the LID from the chosen message, sets it on the target contact and tags it 'active'. Clears the LID from the draft, links unlinked drafts with the same LID or number to the contact and completes the pending PING.")
+@router.post("/contacts/select-response", response_model=SelectResponseResult, summary="Select PING reply (step 3)", description="Takes the LID from the chosen message, sets it on the target contact and tags it 'active'. Clears the LID from the draft, links unlinked drafts with the same LID or number to the contact and completes the pending PING.")
 def select_response(
     body: SelectResponseRequest,
     user=Depends(get_current_user),
@@ -891,7 +958,7 @@ class LinkDraftRequest(BaseModel):
     lid: str = Field(..., description="LID seen on the incoming message. Bogus values are ignored.")
 
 
-@router.post("/contacts/link-draft-to-parent", summary="Link draft to PING contact", description="Called by the agent webhook. Links a draft contact to the contact of the latest pending PING on the phone.")
+@router.post("/contacts/link-draft-to-parent", response_model=LinkDraftResponse, summary="Link draft to PING contact", description="Called by the agent webhook. Links a draft contact to the contact of the latest pending PING on the phone.")
 def link_draft_to_parent(
     body: LinkDraftRequest,
     db: Client = Depends(get_supabase),

@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from dependencies import get_supabase, get_current_user
+from routers.common_schemas import OkResponse
 from supabase import Client
 from logging_config import get_logger
 import httpx
@@ -360,7 +361,7 @@ def _expand(row: dict) -> dict:
 # Schemas
 # ══════════════════════════════════════════════════════════════════════════
 class TestSendReq(BaseModel):
-    """to = מספר או jid מלא. params ריק → נלקחות הדוגמאות מהתבנית."""
+    """to = a number or a full JID. Empty params fall back to the template examples."""
     to: str = Field(..., description="Recipient number or full JID.")
     params: Optional[dict[str, list[str]]] = Field(None, description="Values per part: { header: [...], body: [...] }. Empty values fall back to the examples.")
 
@@ -385,13 +386,80 @@ class StatusUpdate(BaseModel):
     rejected_reason: Optional[str] = Field(None, description="Reason stored when status is rejected; cleared otherwise.")
 
 
+# ── Response Schemas ───────────────────────────────────────────────────────
+
+class TemplateIssue(BaseModel):
+    code: str = Field(..., description="Issue code, translated by the UI (for example tplErrName).")
+    params: Optional[dict[str, Any]] = Field(None, description="Values for the message, when the code needs them.")
+
+
+class TemplateParamMap(BaseModel):
+    header: list[int] = Field([], description="Parameter numbers in the header.")
+    body: list[int] = Field([], description="Parameter numbers in the body.")
+    footer: list[int] = Field([], description="Parameter numbers in the footer (should be empty).")
+
+
+class TemplateResponse(BaseModel):
+    """A phone_templates row (_SELECT columns) + params + preview from _expand."""
+    id: str = Field(..., description="Template id.")
+    phone_id: Optional[str] = Field(None, description="Phone id.")
+    name: Optional[str] = Field(None, description="Template name.")
+    category: Optional[str] = Field(None, description="UTILITY, MARKETING or AUTHENTICATION.")
+    lang: Optional[str] = Field(None, description="Language code.")
+    content: Optional[dict[str, Any]] = Field(None, description="Template parts: header, body, footer, buttons.")
+    examples: Optional[dict[str, Any]] = Field(None, description="Example values per part.")
+    status: Optional[str] = Field(None, description="pending, approved, rejected or pause.")
+    is_published: Optional[bool] = Field(None, description="True when it can be used in scenarios.")
+    param_count: Optional[int] = Field(None, description="Parameters in header + body.")
+    provider_template_id: Optional[str] = Field(None, description="Id at the provider, once registered.")
+    rejected_reason: Optional[str] = Field(None, description="Why the provider rejected it.")
+    created_at: Optional[str] = Field(None, description="ISO 8601 timestamp, as stored.")
+    updated_at: Optional[str] = Field(None, description="ISO 8601 timestamp, as stored.")
+    params: TemplateParamMap = Field(..., description="Parameter numbers per part.")
+    preview: str = Field("", description="Rendered text with the examples filled in.")
+
+
+class TemplateCounts(BaseModel):
+    all: int = Field(0, description="All templates.")
+    pending: int = Field(0, description="Pending templates.")
+    approved: int = Field(0, description="Approved templates.")
+    rejected: int = Field(0, description="Rejected templates.")
+    pause: int = Field(0, description="Paused templates.")
+
+
+class TemplatesPageResponse(BaseModel):
+    items: list[TemplateResponse] = Field(..., description="Templates on this page, newest first.")
+    total: int = Field(..., description="Templates matching the status filter.")
+    page: int = Field(..., description="Current page, starting at 1.")
+    page_size: int = Field(..., description="Rows per page.")
+    total_pages: int = Field(..., description="Number of pages.")
+    status: str = Field(..., description="Applied filter: a status or all.")
+    counts: TemplateCounts = Field(..., description="Count per status, for the filter tabs.")
+
+
+class TestSendResponse(BaseModel):
+    ok: bool = Field(True, description="Always true on success.")
+    message_id: Optional[str] = Field(None, description="WhatsApp id of the sent message.")
+    jid: str = Field(..., description="Recipient JID the message was sent to.")
+    params: dict[str, list[str]] = Field(..., description="Values sent per part: { header, body }.")
+
+
+class TemplateValidateResponse(BaseModel):
+    ok: bool = Field(..., description="True when there are no issues.")
+    issues: list[TemplateIssue] = Field(..., description="Validation issues.")
+
+
+class TemplateDeleteResponse(OkResponse):
+    provider_deleted: bool = Field(..., description="True when the template was also deleted at the provider.")
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Endpoints — סדר חשוב: נתיבים קבועים לפני /{template_id}
 # ══════════════════════════════════════════════════════════════════════════
 
 # ── 4. endpoints — הוסף לפני delete_template ────────────────────────────────
 
-@router.post("/{template_id}/test-send", summary="Test-send template", description="Sends an approved template to a number, even before it is published. Missing parameters are filled from the template examples.")
+@router.post("/{template_id}/test-send", response_model=TestSendResponse, summary="Test-send template", description="Sends an approved template to a number, even before it is published. Missing parameters are filled from the template examples.")
 async def test_send(
     phone_id: str,
     template_id: str,
@@ -505,7 +573,7 @@ async def test_send(
     }
 
 
-@router.post("/{template_id}/approve-publish", summary="Approve and publish template", description="Publishes a template that the provider has already approved.")
+@router.post("/{template_id}/approve-publish", response_model=TemplateResponse, summary="Approve and publish template", description="Publishes a template that the provider has already approved.")
 def approve_and_publish(
     phone_id: str,
     template_id: str,
@@ -555,7 +623,7 @@ def approve_and_publish(
     logger.info(f"[TPL] approve+publish {row['name']}/{row['lang']} phone={phone_id}")
     return _expand(result.data[0])
 
-@router.get("/", summary="List templates", description="Returns templates newest first. phone_id='all' with phone_ids=a,b,c lists across phones. Optional status, lang and name filters. Page size comes from bot_config 'templates.paging'. Returns counts per status.")
+@router.get("/", response_model=TemplatesPageResponse, summary="List templates", description="Returns templates newest first. phone_id='all' with phone_ids=a,b,c lists across phones. Optional status, lang and name filters. Page size comes from bot_config 'templates.paging'. Returns counts per status.")
 def list_templates(
     phone_id: str,
     page: int = Query(1, description="Page number, starting at 1."),
@@ -617,7 +685,7 @@ def list_templates(
         "status":      flt,
         "counts":      counts,
     }
-@router.get("/published", summary="List published templates", description="Returns approved and published templates ordered by name, for the scenario InputEditor.")
+@router.get("/published", response_model=list[TemplateResponse], summary="List published templates", description="Returns approved and published templates ordered by name, for the scenario InputEditor.")
 def list_published(phone_id: str, db: Client = Depends(get_supabase)):
     """לשימוש ה-InputEditor — רק תבניות מאושרות ומפורסמות."""
     result = (
@@ -632,7 +700,7 @@ def list_published(phone_id: str, db: Client = Depends(get_supabase)):
     return [_expand(r) for r in (result.data or [])]
 
 
-@router.get("/{template_id}", summary="Get template", description="Returns one template with its parameter map and preview.")
+@router.get("/{template_id}", response_model=TemplateResponse, summary="Get template", description="Returns one template with its parameter map and preview.")
 def get_template(
     phone_id: str, template_id: str, db: Client = Depends(get_supabase)
 ):
@@ -649,7 +717,7 @@ def get_template(
     return _expand(result.data[0])
 
 
-@router.post("/", summary="Create template", description="Creates a template as a local draft only. Nothing is sent to the Manager until the template is published.")
+@router.post("/", response_model=TemplateResponse, summary="Create template", description="Creates a template as a local draft only. Nothing is sent to the Manager until the template is published.")
 def create_template(
     phone_id: str,
     body: TemplateCreate,
@@ -689,7 +757,7 @@ def create_template(
     return _expand(row)
 
 
-@router.put("/{template_id}", summary="Update template", description="Updates an unpublished template. Changing content moves an approved or rejected template back to pending. Returns 409 when the template is published.")
+@router.put("/{template_id}", response_model=TemplateResponse, summary="Update template", description="Updates an unpublished template. Changing content moves an approved or rejected template back to pending. Returns 409 when the template is published.")
 def update_template(
     phone_id: str,
     template_id: str,
@@ -746,7 +814,7 @@ def update_template(
     return _expand(result.data[0])
 
 
-@router.post("/{template_id}/validate", summary="Validate template", description="Checks the template and returns { ok, issues } without changing it.")
+@router.post("/{template_id}/validate", response_model=TemplateValidateResponse, summary="Validate template", description="Checks the template and returns { ok, issues } without changing it.")
 def validate_template(
     phone_id: str, template_id: str, db: Client = Depends(get_supabase)
 ):
@@ -770,7 +838,7 @@ def validate_template(
     return {"ok": not issues, "issues": issues}
 
 
-@router.patch("/{template_id}/status", summary="Set template status", description="Sets pending, approved, rejected or pause. Any status other than approved also unpublishes the template.")
+@router.patch("/{template_id}/status", response_model=TemplateResponse, summary="Set template status", description="Sets pending, approved, rejected or pause. Any status other than approved also unpublishes the template.")
 def set_status(
     phone_id: str,
     template_id: str,
@@ -796,7 +864,7 @@ def set_status(
     return _expand(result.data[0])
 
 
-@router.post("/{template_id}/publish", summary="Publish template", description="Validates the template, registers it through the Manager, and stores the status the provider returns. Published only when the provider approves.")
+@router.post("/{template_id}/publish", response_model=TemplateResponse, summary="Publish template", description="Validates the template, registers it through the Manager, and stores the status the provider returns. Published only when the provider approves.")
 async def publish_template(
     phone_id: str, template_id: str, db: Client = Depends(get_supabase)
 ):
@@ -862,7 +930,7 @@ async def publish_template(
     return _expand(result.data[0])
 
 
-@router.post("/{template_id}/unpublish", summary="Unpublish template", description="Marks the template as not published.")
+@router.post("/{template_id}/unpublish", response_model=TemplateResponse, summary="Unpublish template", description="Marks the template as not published.")
 def unpublish_template(
     phone_id: str, template_id: str, db: Client = Depends(get_supabase)
 ):
@@ -878,7 +946,7 @@ def unpublish_template(
     return _expand(result.data[0])
 
 
-@router.delete("/{template_id}", summary="Delete template", description="Deletes an unpublished template. Registered templates are deleted through the Manager first. Returns 409 when the template is published.")
+@router.delete("/{template_id}", response_model=TemplateDeleteResponse, summary="Delete template", description="Deletes an unpublished template. Registered templates are deleted through the Manager first. Returns 409 when the template is published.")
 async def delete_template(
     phone_id: str, template_id: str, db: Client = Depends(get_supabase)
 ):

@@ -3,8 +3,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from dependencies import get_supabase
 from supabase import Client
 from pydantic import BaseModel, Field
-from typing import Optional, Literal
+from typing import Any, Optional, Literal
 import uuid
+
+from routers.common_schemas import OkResponse
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
@@ -28,9 +30,29 @@ class MarkReadBody(BaseModel):
     ids: list[str] = Field(default_factory=list, description="Notification ids to mark as read. Leave empty to mark all unread notifications.")  # empty = mark ALL
 
 
+# ── Response Schemas ──────────────────────────────────────────────────────
+
+class NotificationResponse(BaseModel):
+    id: str = Field(..., description="Notification id.")
+    user_id: Optional[str] = Field(None, description="User who receives the notification.")
+    phone_id: Optional[str] = Field(None, description="Phone the notification relates to.")
+    title: Optional[str] = Field(None, description="Short headline.")
+    message: Optional[str] = Field(None, description="Notification body text.")
+    log_level: Optional[str] = Field(None, description="info, success, warning or error.")
+    is_read: Optional[bool] = Field(None, description="True once read.")
+    is_send: Optional[bool] = Field(None, description="True once sent.")
+    source: Optional[str] = Field(None, description="Where the notification came from.")
+    extra: Any = Field(None, description="Free-form JSON with extra context.")
+    created_at: Optional[str] = Field(None, description="ISO 8601 timestamp, as stored.")
+
+
+class UnreadCountResponse(BaseModel):
+    count: int = Field(..., description="Number of unread notifications.")
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────
 
-@router.get("/", summary="List notifications", description="Returns notifications newest first, paged with limit/offset. Set unread_only=true to get only unread ones.")
+@router.get("/", response_model=list[NotificationResponse], summary="List notifications", description="Returns notifications newest first, paged with limit/offset. Set unread_only=true to get only unread ones.")
 def list_notifications(
     limit: int = Query(50, description="Maximum number of notifications to return."),
     offset: int = Query(0, description="Number of notifications to skip, for paging."),
@@ -50,7 +72,7 @@ def list_notifications(
     return result.data or []
 
 
-@router.get("/unread-count", summary="Count unread notifications", description="Returns the number of unread notifications as { count }.")
+@router.get("/unread-count", response_model=UnreadCountResponse, summary="Count unread notifications", description="Returns the number of unread notifications as { count }.")
 def unread_count(db: Client = Depends(get_supabase)):
     result = (
         db.table("notifications")
@@ -61,7 +83,7 @@ def unread_count(db: Client = Depends(get_supabase)):
     return {"count": result.count or 0}
 
 
-@router.post("/mark-read", summary="Mark notifications as read", description="Marks the given ids as read. An empty ids list marks every unread notification as read.")
+@router.post("/mark-read", response_model=OkResponse, summary="Mark notifications as read", description="Marks the given ids as read. An empty ids list marks every unread notification as read.")
 def mark_read(body: MarkReadBody, db: Client = Depends(get_supabase)):
     if body.ids:
         db.table("notifications").update({"is_read": True}).in_("id", body.ids).execute()
@@ -70,7 +92,7 @@ def mark_read(body: MarkReadBody, db: Client = Depends(get_supabase)):
     return {"ok": True}
 
 
-@router.post("/", summary="Create notification", description="Inserts a new unread notification and returns the created row.")
+@router.post("/", response_model=NotificationResponse, summary="Create notification", description="Inserts a new unread notification and returns the created row.")
 def create_notification(body: NotificationCreate, db: Client = Depends(get_supabase)):
     payload = {
         "id":        str(uuid.uuid4()),
@@ -91,7 +113,7 @@ def create_notification(body: NotificationCreate, db: Client = Depends(get_supab
     return result.data[0]
 
 
-@router.delete("/{notification_id}", summary="Delete notification", description="Deletes a notification by id. Returns { ok: true } even when the id does not exist.")
+@router.delete("/{notification_id}", response_model=OkResponse, summary="Delete notification", description="Deletes a notification by id. Returns { ok: true } even when the id does not exist.")
 def delete_notification(notification_id: str, db: Client = Depends(get_supabase)):
     db.table("notifications").delete().eq("id", notification_id).execute()
     return {"ok": True}

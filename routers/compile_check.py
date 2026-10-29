@@ -12,8 +12,8 @@
 import os
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-from typing import Optional, Any, Literal
+from pydantic import BaseModel, Field
+from typing import Optional, Any, Literal, Union
 
 from dependencies import get_current_user, get_service_supabase
 from services.trusted_domains import user_trusted_set, base_domains
@@ -34,25 +34,56 @@ WORKER_TIMEOUT = float(os.getenv("WORKER_DEV_TIMEOUT", "30"))
 # ══════════════════════════════════════════════════════════════════════
 
 class DenoTestPayload(BaseModel):
-    scenarioId: Optional[str] = None
-    stepId: Optional[str] = None
-    contactId: Optional[str] = None
-    contactPhone: Optional[str] = None
-    contactName: Optional[str] = None
-    lastMessageNum: Optional[str] = None
-    lastMessageValue: Optional[str] = None
-    variables: Optional[dict[str, str]] = None
+    scenarioId: Optional[str] = Field(None, description="Scenario id.")
+    stepId: Optional[str] = Field(None, description="Step (card) id.")
+    contactId: Optional[str] = Field(None, description="Contact id.")
+    contactPhone: Optional[str] = Field(None, description="Contact phone number.")
+    contactName: Optional[str] = Field(None, description="Contact name.")
+    lastMessageNum: Optional[str] = Field(None, description="Number of the last message.")
+    lastMessageValue: Optional[str] = Field(None, description="Text of the last message.")
+    variables: Optional[dict[str, str]] = Field(None, description="Scenario variables available to the code.")
 
 
 class CompileCheckRequest(BaseModel):
-    code: str
-    card_type: Literal["expect", "sender"] = "sender"
-    timeout_ms: Optional[int] = 5000
-    payload: Optional[DenoTestPayload] = None
+    code: str = Field(..., description="Deno code of the card.")
+    card_type: Literal["expect", "sender"] = Field("sender", description="expect or sender.")
+    timeout_ms: Optional[int] = Field(5000, description="Run timeout in milliseconds; default 5000.")
+    payload: Optional[DenoTestPayload] = Field(None, description="Test context passed to the code.")
 
 
 class ScenarioCompileRequest(BaseModel):
-    scenario_json: str
+    scenario_json: str = Field(..., description="Full scenario as a JSON string.")
+
+
+# ── Response Schemas ──────────────────────────────────────────────────────
+
+class CompileCheckOk(BaseModel):
+    ok: Literal[True] = Field(True, description="Always true.")
+    output: Any = Field(None, description="Value returned by the code.")
+    proceed: Any = Field(True, description="Whether the flow continues after this card.")
+    output_var: Optional[str] = Field(None, description="Variable the output is stored in.")
+    stdout: Optional[str] = Field(None, description="Console output of the run.")
+    errors: list[str] = Field([], description="Always empty.")
+
+
+class CompileCheckFailed(BaseModel):
+    ok: Literal[False] = Field(False, description="Always false.")
+    errors: list[str] = Field(..., description="Error messages.")
+    stdout: Optional[str] = Field(None, description="Console output of the run.")
+
+
+class ScenarioCompileOk(BaseModel):
+    ok: Literal[True] = Field(True, description="Always true.")
+    step_count: Optional[int] = Field(None, description="Number of compiled steps.")
+    warnings: list[Any] = Field([], description="Compiler warnings.")
+    scenario: Any = Field(None, description="Compiled ICR scenario.")
+    errors: list[str] = Field([], description="Always empty.")
+
+
+class ScenarioCompileFailed(BaseModel):
+    ok: Literal[False] = Field(False, description="Always false.")
+    errors: list[str] = Field(..., description="Error messages.")
+    warnings: list[Any] = Field([], description="Compiler warnings.")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -104,7 +135,7 @@ def _trusted_for_user(user) -> list:
 # POST /scenarios/compile-check — בדיקת קוד Deno של כרטיס
 # ══════════════════════════════════════════════════════════════════════
 
-@compile_router.post("/compile-check")
+@compile_router.post("/compile-check", response_model=Union[CompileCheckOk, CompileCheckFailed], summary="Check card Deno code", description="Runs the card's Deno code on the dev Worker with the user's trusted domains. Returns { ok, output, ... } or { ok: false, errors }.")
 def compile_check(
     body: CompileCheckRequest,
     user=Depends(get_current_user),
@@ -146,7 +177,7 @@ def compile_check(
 # POST /scenarios/compile — קומפילציית ICR מלאה
 # ══════════════════════════════════════════════════════════════════════
 
-@compile_router.post("/compile")
+@compile_router.post("/compile", response_model=Union[ScenarioCompileOk, ScenarioCompileFailed], summary="Compile scenario", description="Compiles the full scenario to ICR on the dev Worker. Returns { ok, step_count, warnings, scenario } or { ok: false, errors, warnings }.")
 def compile_scenario(
     body: ScenarioCompileRequest,
     user=Depends(get_current_user),

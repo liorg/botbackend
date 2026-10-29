@@ -14,6 +14,8 @@ import asyncio
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Response
+from typing import Literal, Optional
+
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from supabase import Client
@@ -66,6 +68,29 @@ def _send_status(db: Client, request_id) -> str | None:
     return ((res and res.data) or {}).get("send_status")
 
 
+# ── Response Schemas ─────────────────────────────────────────────────────
+class TwoFactorStatusResponse(BaseModel):
+    verified: bool = Field(..., description="True when the mobile is verified.")
+    verified_at: Optional[str] = Field(None, description="ISO 8601 timestamp, as stored.")
+    mobile_set: bool = Field(..., description="True when a mobile number is stored.")
+    ttl_sec: int = Field(..., description="Seconds a code stays valid.")
+    resend_sec: int = Field(..., description="Seconds before a new code may be requested.")
+
+
+class OtpRequestResponse(BaseModel):
+    ok: bool = Field(True, description="Always true on success.")
+    status: Literal["sent", "queued"] = Field(..., description="sent (200) or queued (202, still being sent).")
+    sent_to: str = Field(..., description="Masked mobile number.")
+    expires_in: int = Field(..., description="Seconds until the code expires.")
+    resend_in: int = Field(..., description="Seconds until a new code may be requested.")
+
+
+class OtpVerifyResponse(BaseModel):
+    ok: bool = Field(True, description="Always true on success.")
+    verified: bool = Field(True, description="Always true on success.")
+    verified_at: Optional[str] = Field(None, description="ISO 8601 timestamp, as stored.")
+
+
 # ── gate ──────────────────────────────────────────────────────────────────
 def is_2fa_verified(db: Client, user_id: str) -> bool:
     row = db.table("users").select("two_factor_verified").eq("id", user_id).maybe_single().execute()
@@ -82,7 +107,7 @@ def require_2fa(
 
 
 # ── endpoints ─────────────────────────────────────────────────────────────
-@router.get("/status")
+@router.get("/status", response_model=TwoFactorStatusResponse, summary="Get 2FA status", description="Returns whether the mobile is verified, whether a mobile is set, and the code TTL and resend times.")
 def status(
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
@@ -99,7 +124,7 @@ def status(
     }
 
 
-@router.post("/request")
+@router.post("/request", response_model=OtpRequestResponse, responses={202: {"model": OtpRequestResponse, "description": "Queued, not sent yet"}}, summary="Request 2FA code", description="Queues a 6-digit code to the user's mobile on WhatsApp and waits up to 8 seconds for the send result: 200 sent, 202 queued, 502 failed.")
 async def request_otp(
     response: Response,
     user=Depends(get_current_user),
@@ -138,10 +163,10 @@ async def request_otp(
 
 
 class VerifyReq(BaseModel):
-    code: str = Field(..., pattern=r"^\d{6}$")
+    code: str = Field(..., pattern=r"^\d{6}$", description="The 6-digit code received on WhatsApp.")
 
 
-@router.post("/verify")
+@router.post("/verify", response_model=OtpVerifyResponse, summary="Verify 2FA code", description="Checks the 6-digit code and marks the mobile as verified.")
 def verify_otp(
     req: VerifyReq,
     user=Depends(get_current_user),

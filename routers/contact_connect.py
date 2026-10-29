@@ -13,7 +13,7 @@
 #     messages = contact_id ∈ family
 import json
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -23,6 +23,7 @@ from dependencies import get_supabase, get_current_user
 from routers.contact_lang import normalize_lang, get_user_lang_by_phone
 from routers.contacts import _is_valid_lid
 from logging_config import get_logger
+from routers.common_schemas import ContactRow, MessageRow
 
 logger = get_logger("contact_connect")
 router = APIRouter(tags=["contacts"])
@@ -42,6 +43,36 @@ class ConnectContactRequest(BaseModel):
     email: Optional[str] = Field(None, description="Email. An empty string clears it.")
     move_messages: bool = Field(True, description="On merge: move the source contact's messages to the target contact.")
     force: bool = Field(False, description="Merge even when the target already has a different LID (bypasses lid_conflict).")
+
+
+# ── Response Schemas ───────────────────────────────────────────────────────
+
+class ConversationMessage(MessageRow):
+    """MSG_COLS row reshaped by _shape: content parsed to an object."""
+    content: dict[str, Any] = Field({}, description="Message content parsed to an object.")
+    type: str = Field("text", description="Message type from content; text by default.")
+    text: Optional[str] = Field(None, description="Text or caption of the message.")
+    incoming: bool = Field(..., description="True for messages received from the contact.")
+
+
+class ConversationResponse(BaseModel):
+    contact: ContactRow = Field(..., description="Root contact (a connected draft resolves to its parent).")
+    contact_ids: list[str] = Field(..., description="Ids whose messages make up the conversation (root + connected drafts).")
+    messages: list[ConversationMessage] = Field(..., description="Messages, oldest first.")
+    has_more: bool = Field(..., description="True when older messages may exist (use before).")
+
+
+class ConnectContactResponse(BaseModel):
+    success: bool = Field(True, description="Always true on success.")
+    mode: Literal["in_place", "merged"] = Field(..., description="in_place or merged.")
+    contact: ContactRow = Field(..., description="The contact that is now active.")
+    draft_id: Optional[str] = Field(None, description="Source contact id when merged; null in place.")
+    moved_messages: int = Field(..., description="Messages moved to the target on merge.")
+
+
+class ContactActionResponse(BaseModel):
+    success: bool = Field(True, description="Always true on success.")
+    contact: ContactRow = Field(..., description="The updated contact.")
 
 
 def _digits(v: Optional[str]) -> str:
@@ -122,6 +153,7 @@ def _shape(m: dict) -> dict:
 
 @router.get(
     "/contacts/{contact_id}/conversation",
+    response_model=ConversationResponse,
     summary="Contact conversation",
     description=(
         "Returns the contact's messages, oldest → newest.\n\n"
@@ -166,6 +198,7 @@ def get_conversation(
 
 @router.post(
     "/contacts/{contact_id}/connect",
+    response_model=ConnectContactResponse,
     summary="Connect unidentified contact",
     description=(
         "Completes the details (name, number, language, email) of a `new`/`draft` contact and makes it active.\n\n"
@@ -330,6 +363,7 @@ def connect_contact(
 
 @router.post(
     "/contacts/{contact_id}/ignore",
+    response_model=ContactActionResponse,
     summary="Ignore contact",
     description=(
         "Sets `tag=ignore`. The contact is hidden from the calls screen and the contacts list "
@@ -357,6 +391,7 @@ def ignore_contact(
 
 @router.post(
     "/contacts/{contact_id}/unignore",
+    response_model=ContactActionResponse,
     summary="Restore ignored contact",
     description="Returns a contact with `tag=ignore` to `tag=new`, so it appears again in the unidentified list on the calls screen.",
     responses={404: {"description": "No ignored contact found with this ID"}},
