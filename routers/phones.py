@@ -439,15 +439,13 @@ async def provision_phone(
     phone  = existing_res.data[0] if existing_res.data else None
     is_new = phone is None
 
-    # ── new phone: allowlist (Beta) + 2FA. Reconnect of an existing phone — no gate,
-    # same as the UI (App.jsx). Until now the gate lived only in React.
+    # ── new phone: admin OR 2FA — same rule as phone_admin.require_phone_admin
+    # and GET /phones/can_add. Reconnect of an existing phone — no gate.
     if is_new:
-        from routers.phone_admin import BETA_MESSAGE, is_phone_admin
+        from routers.phone_admin import is_phone_admin
         from routers.two_factor import TWO_FA_REQUIRED, is_2fa_verified
 
-        if not is_phone_admin(user):
-            raise HTTPException(status_code=403, detail=BETA_MESSAGE)
-        if not is_2fa_verified(db, user["uid"]):
+        if not (is_phone_admin(user) or is_2fa_verified(db, user["uid"])):
             raise HTTPException(status_code=403, detail=TWO_FA_REQUIRED)
 
     logger.info(
