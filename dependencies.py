@@ -3,7 +3,8 @@ from functools import lru_cache
 import os
 
 import jwt
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from supabase import Client, create_client
 from supabase.client import ClientOptions
 
@@ -253,9 +254,23 @@ class AuthContext:
     user: dict
 
 
+# Declare the existing Supabase access-token authentication in OpenAPI.
+# auto_error=False preserves our existing 401 error handling for missing tokens.
+supabase_bearer = HTTPBearer(
+    scheme_name="SupabaseJWT",
+    description="Supabase Auth access token",
+    auto_error=False,
+)
+
+
 def get_auth(
-    authorization: str | None = Header(None),
+    credentials: HTTPAuthorizationCredentials | None = Depends(supabase_bearer),
 ) -> AuthContext:
+    authorization = (
+        f"Bearer {credentials.credentials}"
+        if credentials is not None and credentials.scheme.lower() == "bearer"
+        else None
+    )
     token = _extract_bearer_token(authorization)
     return AuthContext(token=token, user=_verify_user_token(token))
 
