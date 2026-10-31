@@ -11,7 +11,7 @@ from supabase import Client, create_client
 
 from routers import (
     auth,  phones,  contacts,  scenarios,   schedules,   calls,messages,  proxy_media,  phones_contacts,  webhook_registrations, notifications, active_chats,contact_calls, wa_override_ab,phone_admin,contact_connect,
-    regex_ai,auth_email,two_factor,executions
+    regex_ai,auth_email,two_factor,executions,scenario_io
 )
 from config import APP_MODE
 from routers.template_manager import router as templates_router
@@ -152,7 +152,7 @@ if APP_MODE == "internal":
     app.include_router(contact_connect.router, prefix="/api") 
     app.include_router(regex_ai.router, prefix="/api")
     app.include_router(auth_email.router, prefix="/api")
-    app.include_router(executions.router, prefix="/api")   
+    app.include_router(scenario_io_router, prefix="/api").router, prefix="/api")   
     
 elif APP_MODE == "client":
     # בהתחלה רק endpoints שאתה באמת רוצה לחשוף
@@ -167,7 +167,8 @@ elif APP_MODE == "client":
     app.include_router(contact_connect.router, prefix="/api") 
     app.include_router(regex_ai.router, prefix="/api")
     app.include_router(executions.router, prefix="/api")  
-
+    app.include_router(scenario_io_router, prefix="/api").router, prefix="/api")   
+    
 # ── Startup / Shutdown ────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
