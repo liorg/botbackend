@@ -152,7 +152,7 @@ if APP_MODE == "internal":
     app.include_router(contact_connect.router, prefix="/api") 
     app.include_router(regex_ai.router, prefix="/api")
     app.include_router(auth_email.router, prefix="/api")
-    app.include_router(scenario_io_router, prefix="/api").router, prefix="/api")   
+    app.include_router(scenario_io_router, prefix="/api")
     
 elif APP_MODE == "client":
     # בהתחלה רק endpoints שאתה באמת רוצה לחשוף
@@ -167,7 +167,7 @@ elif APP_MODE == "client":
     app.include_router(contact_connect.router, prefix="/api") 
     app.include_router(regex_ai.router, prefix="/api")
     app.include_router(executions.router, prefix="/api")  
-    app.include_router(scenario_io_router, prefix="/api").router, prefix="/api")   
+    app.include_router(scenario_io_router, prefix="/api")
     
 # ── Startup / Shutdown ────────────────────────────────────────
 @app.on_event("startup")
