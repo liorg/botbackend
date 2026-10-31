@@ -65,13 +65,14 @@ class ExportMetaResponse(BaseModel):
 
 class ImportPreviewReq(BaseModel):
     scenario: dict[str, Any] = Field(..., description="The exported file as is.")
+    name: Optional[str] = Field(None, description="Target scenario name (the one in the designer). The file's fileName is used only when omitted.")
 
 
 class ImportCommitReq(BaseModel):
     scenario: dict[str, Any] = Field(..., description="The exported file as is.")
     mode: Literal["override", "new"] = Field(..., description="override replaces target_scenario_id and unpublishes it; new creates a draft.")
     target_scenario_id: Optional[str] = Field(None, description="Required for override.")
-    name: Optional[str] = Field(None, description="Name for mode=new. Made unique on the phone.")
+    name: Optional[str] = Field(None, description="Target scenario name for mode=new (the one in the designer). The file's fileName is used only when omitted.")
 
 
 class ImportPreviewResponse(BaseModel):
@@ -350,7 +351,9 @@ def export_metadata(phone_id: str, body: ExportMetaReq, db: Client = Depends(get
 @router.post("/preview", response_model=ImportPreviewResponse, summary="Preview scenario import", description="Checks the file against the phone without writing: same-name scenario and a decision per template.")
 def import_preview(phone_id: str, body: ImportPreviewReq, db: Client = Depends(get_supabase)):
     _phone_row(db, phone_id)
-    name = _check_file(body.scenario)
+    # השם הקובע הוא של ה-Designer; fileName בקובץ רק כשלא נשלח שם
+    name = (body.name or "").strip() or _check_file(body.scenario)
+    _check_file(body.scenario)
     rows = _scenario_names(db, phone_id)
     hit = next((r for r in rows if r.get("name") == name), None)
     return {
