@@ -383,8 +383,35 @@ def _agent_template_payload(spec: dict) -> dict:
         "components": components,
     }
     
+async def _approve_seed(db: Client, phone_id: str, spec: dict, attempts: int = 3) -> None:
+    """baileys: אין גורם חיצוני שמאשר — תבנית seed נכנסת approved + is_published.
+    השורה נכתבת ע"י ה-Manager, ולכן ממתינים לה קצרות אם עוד לא הופיעה."""
+    from routers.template_manager import find_template
+
+    row = None
+    for i in range(attempts):
+        row = find_template(db, phone_id, spec["name"], spec["lang"])
+        if row:
+            break
+        await asyncio.sleep(1.0 * (i + 1))
+    if not row:
+        logger.warning(f"[TPL] seed {spec['name']} not in DB — not approved phone={phone_id}")
+        return
+    if row.get("status") == "approved" and row.get("is_published"):
+        return
+
+    db.table("phone_templates").update({
+        "status":          "approved",
+        "is_published":    True,
+        "rejected_reason": None,
+        "updated_at":      datetime.now(timezone.utc).isoformat(),
+    }).eq("id", row["id"]).eq("phone_id", phone_id).execute()
+    logger.info(f"[TPL] seed {spec['name']} → approved+published phone={phone_id}")
+
+
 async def _ensure_seed_templates(db: Client, phone_id: str, host: dict) -> None:
-    """Check the DB; anything missing is created through the agent proxy."""
+    """Check the DB; anything missing is created through the agent proxy.
+    supports_templates = baileys בלבד, ושם ה-seed מאושר ומפורסם מיד."""
     from routers.template_manager import (
         SEED_TEMPLATES, find_template, supports_templates,
     )
@@ -393,21 +420,25 @@ async def _ensure_seed_templates(db: Client, phone_id: str, host: dict) -> None:
         return
 
     for spec in SEED_TEMPLATES:
-        if find_template(db, phone_id, spec["name"], spec["lang"]):
-            continue
-        try:
-            await _agent_post(
-                host["ip_address"],
-                f"/api/phones/{phone_id}/templates",
-                _agent_template_payload(spec),
-                timeout=30,
-            )
-            logger.info(f"[TPL] seeded {spec['name']} phone={phone_id}")
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code != 409:
-                logger.warning(f"[TPL] seed {spec['name']} failed: {e.response.text}")
-        except httpx.RequestError as e:
-            logger.warning(f"[TPL] seed {spec['name']} unreachable: {e}")
+        if not find_template(db, phone_id, spec["name"], spec["lang"]):
+            try:
+                await _agent_post(
+                    host["ip_address"],
+                    f"/api/phones/{phone_id}/templates",
+                    _agent_template_payload(spec),
+                    timeout=30,
+                )
+                logger.info(f"[TPL] seeded {spec['name']} phone={phone_id}")
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code != 409:
+                    logger.warning(f"[TPL] seed {spec['name']} failed: {e.response.text}")
+                    continue
+            except httpx.RequestError as e:
+                logger.warning(f"[TPL] seed {spec['name']} unreachable: {e}")
+                continue
+
+        # גם seed שכבר קיים אבל נשאר pending / לא מפורסם
+        await _approve_seed(db, phone_id, spec)
             
 @router.post("/provision", response_model=ProvisionResponse, summary="Provision phone", description="Creates a phone for the current user, or reuses the one with the same number, on a healthy agent host. Seeds the default templates and returns the QR code or pairing code used to link WhatsApp.")
 async def provision_phone(
@@ -782,6 +813,11 @@ async def _create_one_seed(db: Client, phone_id: str, host: dict, name: str) -> 
         raise HTTPException(status_code=503, detail="Agent unreachable")
 
     logger.info(f"[TPL] created {name} phone={phone_id}")
+
+    from routers.template_manager import supports_templates
+    if supports_templates(db, phone_id):
+        await _approve_seed(db, phone_id, spec)
+
     return {"created": True, "agent": data}
 
 

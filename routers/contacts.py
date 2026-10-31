@@ -67,7 +67,8 @@ class ContactsListResponse(BaseModel):
 
 class DeleteContactResponse(BaseModel):
     ok: bool = Field(True, description="Always true on success.")
-    deleted_messages: int = Field(..., description="Number of messages deleted with the contact.")
+    tag: str = Field("inactive", description="New tag of the contact.")
+    last_tag_change: Optional[str] = Field(None, description="When the tag changed. Set by the DB trigger.")
 
 
 class PingTemplateUsed(BaseModel):
@@ -304,7 +305,7 @@ def list_contacts(
             db.table("contacts")
             .select(
                 "id, phone_id, number, name, whatsapp_name, tag, lid, lang, "  # ⬅️ lang
-                "is_connect, parent_contact_id, created_at, updated_at"
+                "is_connect, parent_contact_id, created_at, updated_at, last_tag_change"
             )
             .eq("phone_id", phone_id)
             .order("updated_at", desc=True)
@@ -361,7 +362,7 @@ def get_contact(
             db.table("contacts")
             .select(
                 "id, phone_id, number, name, whatsapp_name, tag, lid, lang, "
-                "email, is_connect, parent_contact_id, created_at, updated_at"
+                "email, is_connect, parent_contact_id, created_at, updated_at, last_tag_change"
             )
             .eq("id", contact_id)
             .single()
@@ -406,28 +407,29 @@ def update_contact(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/contacts/{contact_id}", response_model=DeleteContactResponse, summary="Delete contact", description="Deletes the contact together with its messages and PING records, and unlinks drafts that pointed to it. Returns the number of deleted messages.")
+@router.delete("/contacts/{contact_id}", response_model=DeleteContactResponse, summary="Deactivate contact", description="Soft delete: sets tag to 'inactive'. Messages, PING records and draft links are kept. last_tag_change is set by the DB trigger.")
 def delete_contact(
     contact_id: str,
     user=Depends(get_current_user),
     db: Client = Depends(get_supabase),
 ):
+    # אין מחיקה פיזית — ההודעות וההיסטוריה נשמרות, והשורה יוצאת מרשימת אנשי הקשר
     try:
-        deleted_msgs = db.table("messages").delete().eq("contact_id", contact_id).execute()
-        msg_count = len(deleted_msgs.data or [])
-
-        db.table("ping_sender").delete().eq("contact_id", contact_id).execute()
-
-        db.table("contacts").update({
-            "parent_contact_id": None,
-            "is_connect":        False,
-        }).eq("parent_contact_id", contact_id).execute()
-
-        db.table("contacts").delete().eq("id", contact_id).execute()
-
-        return {"ok": True, "deleted_messages": msg_count}
+        result = (
+            db.table("contacts")
+            .update({"tag": "inactive", "updated_at": datetime.now(timezone.utc).isoformat()})
+            .eq("id", contact_id)
+            .execute()
+        )
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Contact not found")
+        row = result.data[0]
+        logger.info(f"[CONTACT] {contact_id} → inactive")
+        return {"ok": True, "tag": row.get("tag") or "inactive", "last_tag_change": row.get("last_tag_change")}
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error deleting contact: {e}")
+        logger.error(f"Error deactivating contact: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -487,13 +489,14 @@ async def create_contact_from_ping(
                 if not body.lang and contact.get("lang"):
                     lang = normalize_lang(contact["lang"])
 
-                if contact.get("tag") == "draft":
+                if contact.get("tag") in ("draft", "inactive", "ignore"):
+                    prev_tag = contact.get("tag")
                     db.table("contacts").update({
                         "tag":  "new",
                         "name": body.name or contact.get("name") or clean_number,
                     }).eq("id", contact["id"]).execute()
                     contact = {**contact, "tag": "new"}
-                    logger.info(f"[PING] Upgraded draft → new: {contact['id']}")
+                    logger.info(f"[PING] Upgraded {prev_tag} → new: {contact['id']}")
                 else:
                     logger.info(f"[PING] Contact already exists: {contact['id']}")
             else:
