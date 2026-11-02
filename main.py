@@ -153,6 +153,7 @@ if APP_MODE == "internal":
     app.include_router(regex_ai.router, prefix="/api")
     app.include_router(auth_email.router, prefix="/api")
     app.include_router(scenario_io.router, prefix="/api")
+    app.include_router(executions.router, prefix="/api")  
     
 elif APP_MODE == "client":
     # בהתחלה רק endpoints שאתה באמת רוצה לחשוף
