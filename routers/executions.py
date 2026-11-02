@@ -51,7 +51,16 @@ class ScenariosQuery(BaseModel):
 # router itself relies on; everything else the RPC returns is kept.
 
 class ExecutionListItem(Passthrough):
-    """exec_list row."""
+    """v_executions row."""
+
+
+class ExecutionListPage(Passthrough):
+    """exec_list page."""
+    items: list[ExecutionListItem] = Field(..., description="Executions on this page, newest first.")
+    total: int = Field(..., description="Total number of executions.")
+    page: int = Field(..., description="Returned page (clamped to the last page).")
+    page_size: int = Field(..., description="Page size from bot_config 'executions.paging'.")
+    total_pages: int = Field(..., description="Number of pages, at least 1.")
 
 
 class SourcePhoneItem(Passthrough):
@@ -127,17 +136,25 @@ def _user_id(user: dict) -> str:
 # ── List ───────────────────────────────────────────────────────────────────
 
 @router.get("/",
-    response_model=list[ExecutionListItem],
+    response_model=ExecutionListPage,
     summary="List executions",
     description=(
-        "Returns all parallel executions, newest first. Each row includes the contact, the "
-        "run/JOB name, target phone numbers, source scenario and phone, cloned template count and "
-        "prefix, the number of schedules still pending or firing, and the latest schedule run "
-        "time."
+        "Returns one page of parallel executions, newest first. Page size comes from bot_config "
+        "'executions.paging' (default 10); a page past the end returns the last page. Each row "
+        "includes the contact, the run/JOB name, target phone numbers and count, source scenario "
+        "and phone (kept after the source is deleted, with source_deleted=true), cloned template "
+        "count and prefix, pending schedules, the latest run time, and a computed status: empty "
+        "(no phones left), firing, running or stopped."
     ),
 )
-def list_executions(db: Client = Depends(get_supabase)):
-    return _as_list(_rpc(db, "exec_list", {}))
+def list_executions(
+    page: int = Query(1, ge=1, description="Page number, starting at 1."),
+    db: Client = Depends(get_supabase),
+):
+    data = _rpc(db, "exec_list", {"p_page": page})
+    if data is not None:
+        return data
+    return {"items": [], "total": 0, "page": 1, "page_size": 10, "total_pages": 1}
 
 
 # ── Source phones (Wizard שלב 3) ──────────────────────────────────────────
