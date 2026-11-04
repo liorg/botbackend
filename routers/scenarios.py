@@ -2,7 +2,7 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, Depends, HTTPException, Query
-from dependencies import get_supabase
+from dependencies import get_supabase, get_current_user
 from supabase import Client
 from pydantic import BaseModel, Field
 from typing import Optional, Any, Literal
@@ -33,6 +33,30 @@ def _get_page_size(db: Client) -> int:
     except Exception:
         pass
     return DEFAULT_PAGE_SIZE
+
+def _require_phone_owner(db: Client, phone_id: str, user: dict) -> None:
+    """הטלפון חייב להיות של המשתמש המחובר. 404 ולא 403 — לא חושפים שה-id קיים."""
+    res = (
+        db.table("phones")
+        .select("id")
+        .eq("id", phone_id)
+        .eq("user_id", user["uid"])
+        .limit(1)
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Phone not found")
+
+
+def phone_owner(
+    phone_id: str,
+    user=Depends(get_current_user),
+    db: Client = Depends(get_supabase),
+) -> dict:
+    """Dependency לכל endpoint ב-router: אימות + בעלות על phone_id מה-path."""
+    _require_phone_owner(db, phone_id, user)
+    return user
+
 
 # ── Schemas ────────────────────────────────────────────────────────────────
 
@@ -287,7 +311,7 @@ def _run_publish_checks(row: dict, db: Client, phone_id: str) -> list[dict]:
 def list_scenarios(
     phone_id: str,
     page: int = Query(1, description="Page number, starting at 1."),
-    db: Client = Depends(get_supabase),
+    db: Client = Depends(get_supabase), _user=Depends(phone_owner),
 ):
     page = max(1, page)
     page_size = _get_page_size(db)
@@ -317,7 +341,7 @@ def list_scenarios(
 def list_scenarios_by_type(
     phone_id: str,
     event_type: Literal["trigger", "scheduler"],
-    db: Client = Depends(get_supabase)
+    db: Client = Depends(get_supabase), _user=Depends(phone_owner)
 ):
     result = (
         db.table("scenarios")
@@ -334,7 +358,7 @@ def list_scenarios_by_type(
 # ── Get one ────────────────────────────────────────────────────────────────
 @router.get("/{scenario_id}", response_model=ScenarioResponse, summary="Get scenario", description="Returns one scenario of the phone with its config fields expanded.")
 def get_scenario(
-    phone_id: str, scenario_id: str, db: Client = Depends(get_supabase)
+    phone_id: str, scenario_id: str, db: Client = Depends(get_supabase), _user=Depends(phone_owner)
 ):
     result = (
         db.table("scenarios")
@@ -352,7 +376,7 @@ def get_scenario(
 # ── Create ─────────────────────────────────────────────────────────────────
 @router.post("/", response_model=ScenarioResponse, summary="Create scenario", description="Creates a scenario (draft by default). Designer fields are stored inside config.")
 def create_scenario(
-    phone_id: str, body: ScenarioCreate, db: Client = Depends(get_supabase)
+    phone_id: str, body: ScenarioCreate, db: Client = Depends(get_supabase), _user=Depends(phone_owner)
 ):
     config = _merge_config({}, body)
 
@@ -379,7 +403,7 @@ def create_scenario(
 @router.put("/{scenario_id}", response_model=ScenarioResponse, summary="Update scenario", description="Updates a scenario. Designer fields are merged into the existing config; only the fields that are sent change.")
 def update_scenario(
     phone_id: str, scenario_id: str, body: ScenarioUpdate,
-    db: Client = Depends(get_supabase)
+    db: Client = Depends(get_supabase), _user=Depends(phone_owner)
 ):
     existing = (
         db.table("scenarios")
@@ -420,7 +444,7 @@ def update_scenario(
 # ── Publish ────────────────────────────────────────────────────────────────
 @router.post("/{scenario_id}/publish", response_model=ScenarioResponse, summary="Publish scenario", description="Validates components, scheduler templates, trusted domains in script URLs and Deno code, compiles on the Worker, then sets status to active. Returns 422 with issues when a check fails.")
 def publish_scenario(
-    phone_id: str, scenario_id: str, db: Client = Depends(get_supabase)
+    phone_id: str, scenario_id: str, db: Client = Depends(get_supabase), _user=Depends(phone_owner)
 ):
     # ⬅️ שולפים את השורה המלאה (כולל config) — לא רק לבדוק שהיא קיימת
     existing = (
@@ -467,7 +491,7 @@ def publish_scenario(
     ),
 )
 def delete_scenario(
-    phone_id: str, scenario_id: str, db: Client = Depends(get_supabase)
+    phone_id: str, scenario_id: str, db: Client = Depends(get_supabase), _user=Depends(phone_owner)
 ):
     try:
         result = (
