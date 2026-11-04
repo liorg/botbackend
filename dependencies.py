@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 import os
 
+import httpx
 import jwt
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -59,6 +60,82 @@ def _get_jwt_secret() -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# HTTP transport (supabase 2.4.x / postgrest 0.16 / gotrue 2.11)
+#
+# postgrest and gotrue open httpx with http2=True and no keepalive limit. The
+# cached clients below keep that connection for the life of the process;
+# after an idle period the Supabase edge closes it, and the first request
+# after the pause hangs or fails while the second one works.
+#
+#   http2=False        — no single multiplexed connection for all threads
+#   keepalive_expiry   — drop idle connections before the server does
+#   retries=1          — httpx retries ConnectError/ConnectTimeout only,
+#                        so a POST is never sent twice
+#
+# SUPABASE_CUSTOM_HTTP=0 restores the library defaults.
+# ---------------------------------------------------------------------------
+
+SUPABASE_CUSTOM_HTTP   = os.getenv("SUPABASE_CUSTOM_HTTP", "1") != "0"
+SUPABASE_HTTP_TIMEOUT  = float(os.getenv("SUPABASE_HTTP_TIMEOUT", "20"))
+SUPABASE_KEEPALIVE_SEC = float(os.getenv("SUPABASE_KEEPALIVE_SEC", "30"))
+
+
+def _transport(verify=True) -> httpx.HTTPTransport:
+    # limits / http2 / verify belong to the transport: once a transport is
+    # passed, httpx.Client ignores its own copies of these arguments.
+    return httpx.HTTPTransport(
+        http2=False,
+        retries=1,
+        verify=verify,
+        limits=httpx.Limits(
+            max_connections=50,
+            max_keepalive_connections=10,
+            keepalive_expiry=SUPABASE_KEEPALIVE_SEC,
+        ),
+    )
+
+
+def _http_client(**kw) -> httpx.Client:
+    verify = kw.pop("verify", True)
+    return httpx.Client(
+        transport=_transport(verify),
+        timeout=httpx.Timeout(SUPABASE_HTTP_TIMEOUT, connect=5.0),
+        follow_redirects=True,
+        **kw,
+    )
+
+
+def _patch_postgrest() -> None:
+    """postgrest builds its session in create_session(); replace that one
+    method so every postgrest client (service and per-user) gets our pool."""
+    try:
+        from postgrest._sync.client import SyncPostgrestClient
+    except Exception as e:  # noqa: BLE001
+        print(f"[SUPABASE] postgrest patch skipped: {e}")
+        return
+
+    def create_session(self, base_url, headers, timeout, verify=True, *args, **kwargs):
+        return _http_client(base_url=base_url, headers=headers, verify=verify)
+
+    SyncPostgrestClient.create_session = create_session
+    print("[SUPABASE] postgrest: http2=off "
+          f"keepalive={SUPABASE_KEEPALIVE_SEC}s timeout={SUPABASE_HTTP_TIMEOUT}s")
+
+
+def _patch_auth(db: Client) -> None:
+    """gotrue keeps its httpx client in auth._http_client; get_user only
+    calls .request(method, url, headers=..., params=..., json=...)."""
+    try:
+        db.auth._http_client = _http_client()
+    except Exception as e:  # noqa: BLE001
+        print(f"[SUPABASE] auth patch skipped: {e}")
+
+
+if SUPABASE_CUSTOM_HTTP:
+    _patch_postgrest()
+
+
+# ---------------------------------------------------------------------------
 # Cached clients. A client per request means a new httpx pool per request.
 # ---------------------------------------------------------------------------
 
@@ -80,7 +157,7 @@ def _auth_client() -> Client:
             raise
         key = _get_service_key()
 
-    return create_client(
+    db = create_client(
         _get_supabase_url(),
         key,
         options=ClientOptions(
@@ -88,6 +165,9 @@ def _auth_client() -> Client:
             auto_refresh_token=False,
         ),
     )
+    if SUPABASE_CUSTOM_HTTP:
+        _patch_auth(db)
+    return db
 
 
 def get_service_supabase() -> Client:
