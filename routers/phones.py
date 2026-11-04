@@ -23,6 +23,8 @@ AGENT_PORT    = int(os.getenv("AGENT_PORT", "5000"))
 AGENT_TOKEN   = os.getenv("AGENT_TOKEN", "")
 AGENT_TIMEOUT = float(os.getenv("AGENT_TIMEOUT", "10"))
 HOST_HEARTBEAT_TIMEOUT_MINUTES = int(os.getenv("HOST_HEARTBEAT_TIMEOUT", "60"))
+# waiting ישן מזה נחשב complete — מגן מטלפון שנתקע אפור כשה-status לא השתנה
+STATUS_EVENT_TTL_SEC = int(os.getenv("STATUS_EVENT_TTL_SEC", "180"))
 BLOCKED_IPS = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
 
 
@@ -71,6 +73,8 @@ class PhoneResponse(BaseModel):
     pairing_code: Optional[str] = Field(None, description="Current pairing code, when pairing by code.")
     pairing_code_expiry: Optional[str] = Field(None, description="When the pairing code expires. ISO 8601 timestamp, as stored.")
     use_pairing_code: Optional[bool] = Field(None, description="True when the phone links with a pairing code instead of a QR code.")
+    status_event: Optional[str] = Field("complete", description="waiting while an async action (disconnect) is in progress, else complete.")
+    status_event_at: Optional[str] = Field(None, description="When status_event last changed. ISO 8601 timestamp, as stored.")
 
 
 class AgentHostHealth(BaseModel):
@@ -307,8 +311,39 @@ async def _get_host_for_phone(db: Client, phone_id: str) -> Optional[dict]:
 PHONE_COLUMNS = (
     "id, user_id, number, label, color, status, docker_status, "
     "created_at, provider, lang, pairing_code, pairing_code_expiry, "
-    "use_pairing_code"
+    "use_pairing_code, status_event, status_event_at"
 )
+
+def _set_status_event(db: Client, phone_id: str, user_id: str, value: str) -> bool:
+    res = (
+        db.table("phones")
+        .update({
+            "status_event":    value,
+            "status_event_at": datetime.now(timezone.utc).isoformat(),
+        })
+        .eq("id", phone_id)
+        .eq("user_id", user_id)
+        .execute()
+    )
+    return bool(res.data)
+
+
+def _expire_stale_status_event(row: dict) -> dict:
+    """waiting שעבר STATUS_EVENT_TTL_SEC מוצג כ-complete (ה-status לא השתנה,
+    למשל טלפון שכבר היה מנותק). הדגל ב-DB נסגר בפעולה הבאה."""
+    if row.get("status_event") != "waiting":
+        return row
+    at = row.get("status_event_at")
+    if not at:
+        return row
+    try:
+        ts = datetime.fromisoformat(at.replace("Z", "+00:00"))
+    except ValueError:
+        return row
+    if datetime.now(timezone.utc) - ts > timedelta(seconds=STATUS_EVENT_TTL_SEC):
+        row["status_event"] = "complete"
+    return row
+
 
 @router.get("/", response_model=list[PhoneResponse], summary="List my phones", description="Returns the phones owned by the current user. Session credentials are never included.")
 def list_phones(user=Depends(get_current_user), db: Client = Depends(get_supabase)):
@@ -318,7 +353,7 @@ def list_phones(user=Depends(get_current_user), db: Client = Depends(get_supabas
         .eq("user_id", user["uid"])
         .execute()
     )
-    return result.data
+    return [_expire_stale_status_event(r) for r in (result.data or [])]
 
 @internal_route(router.get("/agents/health", response_model=AgentsHealthResponse, summary="Check agent hosts health", description="Internal. Health-checks every active agent host, refreshes last_heartbeat on healthy ones and returns a summary."))
 async def agents_health(user=Depends(get_current_user), db: Client = Depends(get_supabase)):
@@ -621,12 +656,27 @@ async def logout_phone(phone_id: str, user=Depends(get_current_user), db: Client
     host = await _get_host_for_phone(db, phone_id)
     if not host:
         raise HTTPException(status_code=404, detail="Phone host not found")
+
+    # waiting לפני הקריאה: ה-agent מעדכן status תוך כדי, וה-trigger
+    # (phones_status_event_complete) סוגר ל-complete כשהתשובה מגיעה.
+    # .eq(user_id) — גם בדיקת בעלות.
+    if not _set_status_event(db, phone_id, user["uid"], "waiting"):
+        raise HTTPException(status_code=404, detail="Phone not found")
+
     try:
-        return await _agent_post(host["ip_address"], f"/api/phones/{phone_id}/logout", {})
+        data = await _agent_post(host["ip_address"], f"/api/phones/{phone_id}/logout", {})
     except httpx.HTTPStatusError as e:
+        _set_status_event(db, phone_id, user["uid"], "complete")
         raise HTTPException(status_code=502, detail=f"Agent error: {e.response.text}")
     except httpx.RequestError:
+        _set_status_event(db, phone_id, user["uid"], "complete")
         raise HTTPException(status_code=503, detail="Agent unreachable")
+
+    if isinstance(data, dict) and data.get("success") is False:
+        _set_status_event(db, phone_id, user["uid"], "complete")
+        return data
+
+    return {**(data or {}), "status_event": "waiting"}
 
 
 @router.post("/{phone_id}/send/text", response_model=AgentActionResponse, summary="Send text message", description="Sends a WhatsApp text message from the phone through its agent host. Requires jid (or the legacy to) and text.")
