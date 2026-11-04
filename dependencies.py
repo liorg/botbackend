@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from functools import lru_cache
 import os
 
-import httpx
 import jwt
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -60,59 +59,13 @@ def _get_jwt_secret() -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# HTTP transport
-#
-# supabase-py defaults to httpx with http2=True and no keepalive limit. The
-# cached clients below hold one connection for the life of the process; after
-# an idle period the Supabase edge closes it, and the first request after the
-# pause hangs or fails (RemoteProtocolError / ReadTimeout) while the second
-# one works. postgrest's own retry only covers 503/520 responses, not a dead
-# connection.
-#
-#   http2=False          — no single multiplexed connection shared by every
-#                          threadpool request
-#   keepalive_expiry     — drop idle connections before the server does
-#   retries=1            — httpx retries ConnectError / ConnectTimeout only,
-#                          so a POST is never sent twice
-# ---------------------------------------------------------------------------
-
-SUPABASE_HTTP_TIMEOUT = float(os.getenv("SUPABASE_HTTP_TIMEOUT", "20"))
-SUPABASE_KEEPALIVE_SEC = float(os.getenv("SUPABASE_KEEPALIVE_SEC", "30"))
-
-
-def _http_client() -> httpx.Client:
-    # limits / http2 go on the transport: when a transport is passed,
-    # httpx.Client ignores its own limits= and http2= arguments.
-    transport = httpx.HTTPTransport(
-        http2=False,
-        retries=1,
-        limits=httpx.Limits(
-            max_connections=50,
-            max_keepalive_connections=10,
-            keepalive_expiry=SUPABASE_KEEPALIVE_SEC,
-        ),
-    )
-    return httpx.Client(
-        transport=transport,
-        timeout=httpx.Timeout(SUPABASE_HTTP_TIMEOUT, connect=5.0),
-        follow_redirects=True,
-    )
-
-
-def _options(**kw) -> ClientOptions:
-    """ClientOptions with our httpx client. One httpx client per Supabase
-    client — never shared between two Supabase clients."""
-    return ClientOptions(httpx_client=_http_client(), **kw)
-
-
-# ---------------------------------------------------------------------------
 # Cached clients. A client per request means a new httpx pool per request.
 # ---------------------------------------------------------------------------
 
 @lru_cache(maxsize=1)
 def _service_client() -> Client:
     """Service role: bypasses RLS. Never leaves the backend."""
-    return create_client(_get_supabase_url(), _get_service_key(), options=_options())
+    return create_client(_get_supabase_url(), _get_service_key())
 
 
 @lru_cache(maxsize=1)
@@ -130,7 +83,7 @@ def _auth_client() -> Client:
     return create_client(
         _get_supabase_url(),
         key,
-        options=_options(
+        options=ClientOptions(
             persist_session=False,
             auto_refresh_token=False,
         ),
@@ -340,7 +293,7 @@ def _user_client(token: str) -> Client:
     db = create_client(
         _get_supabase_url(),
         _get_client_key(),
-        options=_options(
+        options=ClientOptions(
             persist_session=False,
             auto_refresh_token=False,
         ),
