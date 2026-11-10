@@ -75,6 +75,8 @@ class PhoneResponse(BaseModel):
     use_pairing_code: Optional[bool] = Field(None, description="True when the phone links with a pairing code instead of a QR code.")
     status_event: Optional[str] = Field("complete", description="waiting while an async action (disconnect) is in progress, else complete.")
     status_event_at: Optional[str] = Field(None, description="When status_event last changed. ISO 8601 timestamp, as stored.")
+    rented: bool = Field(False, description="True when this is a rented SIM phone (shows the SMS tab).")
+    rent_end_time: Optional[str] = Field(None, description="When the rental ends. ISO 8601 timestamp, as stored.")
 
 
 class AgentHostHealth(BaseModel):
@@ -311,7 +313,7 @@ async def _get_host_for_phone(db: Client, phone_id: str) -> Optional[dict]:
 PHONE_COLUMNS = (
     "id, user_id, number, label, color, status, docker_status, "
     "created_at, provider, lang, pairing_code, pairing_code_expiry, "
-    "use_pairing_code, status_event, status_event_at"
+    "use_pairing_code, status_event, status_event_at, sim_id"
 )
 
 def _set_status_event(db: Client, phone_id: str, user_id: str, value: str) -> bool:
@@ -353,7 +355,27 @@ def list_phones(user=Depends(get_current_user), db: Client = Depends(get_supabas
         .eq("user_id", user["uid"])
         .execute()
     )
-    return [_expire_stale_status_event(r) for r in (result.data or [])]
+    rows = result.data or []
+
+    # טלפון מושכר = sim_id + השכרה פעילה שלי → טאב SMS + טיימר
+    rents = {}
+    if any(r.get("sim_id") for r in rows):
+        rr = (
+            db.table("rent")
+            .select("phone_id, end_time")
+            .eq("user_id", user["uid"])
+            .eq("status", "rent")
+            .execute()
+        )
+        rents = {r["phone_id"]: r["end_time"] for r in (rr.data or [])}
+
+    out = []
+    for r in rows:
+        r = _expire_stale_status_event(r)
+        r["rented"] = bool(r.get("sim_id")) and r["id"] in rents
+        r["rent_end_time"] = rents.get(r["id"])
+        out.append(r)
+    return out
 
 @internal_route(router.get("/agents/health", response_model=AgentsHealthResponse, summary="Check agent hosts health", description="Internal. Health-checks every active agent host, refreshes last_heartbeat on healthy ones and returns a summary."))
 async def agents_health(user=Depends(get_current_user), db: Client = Depends(get_supabase)):
@@ -734,6 +756,11 @@ def update_phone(
 
 @router.delete("/{phone_id}", response_model=OkResponse, summary="Delete phone", description="Deletes a phone owned by the current user.")
 def delete_phone(phone_id: str, user=Depends(get_current_user), db: Client = Depends(get_supabase)):
+    # טלפון מושכר (SIM פיזי) לא נמחק — מסיימים השכרה (DELETE /rent/phones/{id})
+    sim = db.table("phones").select("sim_id").eq("id", phone_id).eq("user_id", user["uid"]).limit(1).execute()
+    if sim.data and sim.data[0].get("sim_id"):
+        raise HTTPException(status_code=409, detail="Rented phone — end the rental instead of deleting it")
+
     result = (
         db.table("phones")
         .delete()
