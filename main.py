@@ -146,16 +146,16 @@ if APP_MODE == "internal":
     app.include_router(compile_router, prefix="/api")
     app.include_router(notifications.router, prefix="/api")
     app.include_router(active_chats.router, prefix="/api")
-    app.include_router(contact_calls.router, prefix="/api")  
+    app.include_router(contact_calls.router, prefix="/api")
     app.include_router(templates_router, prefix="/api")
-    app.include_router(wa_override_ab.router, prefix="/api")   
-    app.include_router(contact_connect.router, prefix="/api") 
+    app.include_router(wa_override_ab.router, prefix="/api")
+    app.include_router(contact_connect.router, prefix="/api")
     app.include_router(regex_ai.router, prefix="/api")
     app.include_router(auth_email.router, prefix="/api")
     app.include_router(scenario_io.router, prefix="/api")
-    app.include_router(executions.router, prefix="/api")  
-    app.include_router(RentDevice.router, prefix="/api")
-    
+    app.include_router(executions.router, prefix="/api")
+    app.include_router(RentDevice.router, prefix="/api")    # /api/rent/* — טלפונים מושכרים + SMS
+
 elif APP_MODE == "client":
     # בהתחלה רק endpoints שאתה באמת רוצה לחשוף
     app.include_router(phones.router, prefix="/api")
@@ -166,12 +166,12 @@ elif APP_MODE == "client":
     app.include_router(schedules.router, prefix="/api")
     app.include_router(phones_contacts.router, prefix="/api")
     app.include_router(templates_router, prefix="/api")
-    app.include_router(contact_connect.router, prefix="/api") 
+    app.include_router(contact_connect.router, prefix="/api")
     app.include_router(regex_ai.router, prefix="/api")
-    app.include_router(executions.router, prefix="/api")  
+    app.include_router(executions.router, prefix="/api")
     app.include_router(scenario_io.router, prefix="/api")
-    
-    
+
+
 # ── Startup / Shutdown ────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
@@ -198,6 +198,11 @@ async def startup():
             "Internal mode - service DB initialized and recording webhook ensured"
         )
 
+        # השכרות שהזמן שלהן עבר → חזרה למאגר (rpc_rent_expire, כל RENT_SWEEP_SEC)
+        app.state.rent_expiry_task = asyncio.create_task(
+            RentDevice.rent_expiry_worker(app.state.service_db)
+        )
+
     else:
         app.state.service_db = None
 
@@ -207,11 +212,12 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    task = getattr(app.state, "recording_expiry_task", None)
-    if task:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+    for name in ("recording_expiry_task", "rent_expiry_task"):
+        task = getattr(app.state, name, None)
+        if task:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     await regex_ai_svc.close()
 
