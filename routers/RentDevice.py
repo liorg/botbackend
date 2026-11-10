@@ -9,12 +9,13 @@ RentDevice — טלפונים מושכרים (SIM פיזי ב-phone-hub) + טא�
     GET    /rent/phones/{phone_id}/sms/thread        דיאלוג: keyset אחורה (before_at + before_id)
 
 השכרה = טלפון חדש למשתמש: אותו כלל כמו provision — admin או 2FA.
-פקיעה: לולאה ברקע כל RENT_SWEEP_SEC (rpc_rent_expire, skip locked — בטוח גם בכמה replicas).
+פקיעה: rent_expiry_worker כל RENT_SWEEP_SEC (rpc_rent_expire, skip locked) — main.py מפעיל ב-INTERNAL.
 כל ה-RPC רצים כ-service role; הבעלות נבדקת כאן.
 
 רישום ב-main.py:
-    from routers.RentDevice import router as rent_router
-    app.include_router(rent_router, prefix="/api")
+    app.include_router(RentDevice.router, prefix="/api")
+    startup (INTERNAL): app.state.rent_expiry_task = asyncio.create_task(
+                            RentDevice.rent_expiry_worker(app.state.service_db))
 """
 
 import asyncio
@@ -193,20 +194,17 @@ async def _sweep_once(db: Client) -> None:
         await _reseed(db, phone_id)
 
 
-async def _sweep_loop() -> None:
-    db = get_supabase()
+async def rent_expiry_worker(db: Client) -> None:
+    """מופעל מ-main.py (INTERNAL בלבד) עם app.state.service_db."""
+    logger.info(f"[RENT] expiry sweep every {RENT_SWEEP_SEC}s")
     while True:
         try:
             await _sweep_once(db)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(f"[RENT] sweep failed: {e}")
         await asyncio.sleep(RENT_SWEEP_SEC)
-
-
-@router.on_event("startup")
-async def _start_sweep() -> None:
-    asyncio.create_task(_sweep_loop())
-    logger.info(f"[RENT] expiry sweep every {RENT_SWEEP_SEC}s")
 
 
 # ══════════════════════════════════════════════════════════════════════════
