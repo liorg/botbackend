@@ -9,17 +9,13 @@ RentDevice — טלפונים מושכרים (SIM פיזי ב-phone-hub) + טא�
     GET    /rent/phones/{phone_id}/sms/thread        דיאלוג: keyset אחורה (before_at + before_id)
 
 השכרה = טלפון חדש למשתמש: אותו כלל כמו provision — admin או 2FA.
-פקיעה: rent_expiry_worker כל RENT_SWEEP_SEC (rpc_rent_expire, skip locked) — main.py מפעיל ב-INTERNAL.
+פקיעה + התראות: PhoneOrchestrator (RentSweeper → rpc_rent_sweep). ה-backend לא מטפל בזה.
 כל ה-RPC רצים כ-service role; הבעלות נבדקת כאן.
 
 רישום ב-main.py:
     app.include_router(RentDevice.router, prefix="/api")
-    startup (INTERNAL): app.state.rent_expiry_task = asyncio.create_task(
-                            RentDevice.rent_expiry_worker(app.state.service_db))
 """
 
-import asyncio
-import os
 from datetime import datetime
 from typing import Optional
 
@@ -34,7 +30,6 @@ logger = get_logger("rent")
 
 router = APIRouter(prefix="/rent", tags=["rent"])
 
-RENT_SWEEP_SEC = int(os.getenv("RENT_SWEEP_SEC", "60"))
 
 REASONS = {
     "not_found":     (404, "Phone not found"),
@@ -181,30 +176,6 @@ def _require_my_rented_phone(db: Client, user: dict, phone_id: str) -> None:
     )
     if not res.data:
         raise HTTPException(status_code=404, detail="Rented phone not found")
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# Expiry sweep
-# ══════════════════════════════════════════════════════════════════════════
-
-async def _sweep_once(db: Client) -> None:
-    expired = _rpc(db, "rpc_rent_expire", {"p_keep_templates": _keep_templates()}) or []
-    for phone_id in expired:
-        logger.info(f"[RENT] expired phone={phone_id}")
-        await _reseed(db, phone_id)
-
-
-async def rent_expiry_worker(db: Client) -> None:
-    """מופעל מ-main.py (INTERNAL בלבד) עם app.state.service_db."""
-    logger.info(f"[RENT] expiry sweep every {RENT_SWEEP_SEC}s")
-    while True:
-        try:
-            await _sweep_once(db)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.warning(f"[RENT] sweep failed: {e}")
-        await asyncio.sleep(RENT_SWEEP_SEC)
 
 
 # ══════════════════════════════════════════════════════════════════════════
