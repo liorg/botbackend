@@ -198,11 +198,6 @@ async def startup():
             "Internal mode - service DB initialized and recording webhook ensured"
         )
 
-        # השכרות שהזמן שלהן עבר → חזרה למאגר (rpc_rent_expire, כל RENT_SWEEP_SEC)
-        app.state.rent_expiry_task = asyncio.create_task(
-            RentDevice.rent_expiry_worker(app.state.service_db)
-        )
-
     else:
         app.state.service_db = None
 
@@ -212,7 +207,7 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    for name in ("recording_expiry_task", "rent_expiry_task"):
+    for name in ("recording_expiry_task",):
         task = getattr(app.state, name, None)
         if task:
             task.cancel()
