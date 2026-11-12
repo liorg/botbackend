@@ -77,6 +77,8 @@ class PhoneResponse(BaseModel):
     status_event_at: Optional[str] = Field(None, description="When status_event last changed. ISO 8601 timestamp, as stored.")
     rented: bool = Field(False, description="True when this is a rented SIM phone (shows the SMS tab).")
     rent_end_time: Optional[str] = Field(None, description="When the rental ends. ISO 8601 timestamp, as stored.")
+    rent_start_time: Optional[str] = Field(None, description="When the rental started. ISO 8601 timestamp, as stored.")
+    rent_warn_percent: Optional[float] = Field(None, description="bot_config rent.warn_percent — the battery turns red from here (same moment as the warning notification).")
 
 
 class AgentHostHealth(BaseModel):
@@ -358,22 +360,31 @@ def list_phones(user=Depends(get_current_user), db: Client = Depends(get_supabas
     rows = result.data or []
 
     # טלפון מושכר = sim_id + השכרה פעילה שלי → טאב SMS + טיימר
-    rents = {}
+    rents, warn_pct = {}, None
     if any(r.get("sim_id") for r in rows):
         rr = (
             db.table("rent")
-            .select("phone_id, end_time")
+            .select("phone_id, start_time, end_time")
             .eq("user_id", user["uid"])
             .eq("status", "rent")
             .execute()
         )
-        rents = {r["phone_id"]: r["end_time"] for r in (rr.data or [])}
+        rents = {r["phone_id"]: r for r in (rr.data or [])}
+        if rents:
+            cfg = db.table("bot_config").select("value").eq("key", "rent.warn_percent").limit(1).execute()
+            try:
+                warn_pct = float(cfg.data[0]["value"]) if cfg.data else 80.0
+            except (TypeError, ValueError):
+                warn_pct = 80.0
 
     out = []
     for r in rows:
         r = _expire_stale_status_event(r)
-        r["rented"] = bool(r.get("sim_id")) and r["id"] in rents
-        r["rent_end_time"] = rents.get(r["id"])
+        rent = rents.get(r["id"])
+        r["rented"] = bool(r.get("sim_id")) and rent is not None
+        r["rent_start_time"] = rent["start_time"] if rent else None
+        r["rent_end_time"] = rent["end_time"] if rent else None
+        r["rent_warn_percent"] = warn_pct if rent else None
         out.append(r)
     return out
 
